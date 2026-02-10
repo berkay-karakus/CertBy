@@ -1,0 +1,12 @@
+db.php
+
+vendor/
+.DS_Store
+.idea/
+.vscode/
+
+uploads/*
+!uploads/.gitkeep
+
+info.php
+phpinfo.php

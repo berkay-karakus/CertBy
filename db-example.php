@@ -1,9 +1,14 @@
+
 <?php
+
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
 
 $host = 'localhost';
 $dbname = 'certby';
 $user = 'root';
-$password = '123456';
+$password = 'YOUR_PASSWORD';
 
 try {
     $db = new PDO("mysql:host=$host;dbname=$dbname;charset=utf8mb4", $user, $password);
