@@ -27,7 +27,7 @@ Follow these steps to set up the project on your local machine:
 
 1. Clone the Repository:
    ```bash
-   git clone [https://github.com/berkay-karakus/CertBy.git](https://github.com/berkay-karakus/CertBy.git)
+   git clone https://github.com/berkay-karakus/CertBy.git
 
 2. Database Configuration
    Rename db-example.php to db.php.
