@@ -225,7 +225,7 @@ try {
 <body>
 
 <div class="container">
-    <a href="dashboard.php" class="back-link"><i class="fa fa-arrow-left"></i> Dashboard'a Dön</a>
+    <a href="dashboard.php" class="back-link"><i class="fa fa-arrow-left"></i> Ana Sayfaya Dön</a>
     
     <div class="header">
         <h1 class="header-title">Sistem Logları</h1>

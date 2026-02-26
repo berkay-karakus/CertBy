@@ -280,7 +280,8 @@ try {
         .full-width { grid-column: 1 / -1; } 
         .form-field { margin-bottom: 15px; }
         .form-field label { display: block; margin-bottom: 5px; font-weight: 500; color: #495057; }
-        .required { color: var(--danger-color); }
+        label.required::after { content: " *"; color: var(--danger-color); }
+        .form-control { width: 100%; padding: 10px; border: 1px solid var(--border-color); border-radius: 4px; box-sizing: border-box; }
         .form-field input, .form-field select, .form-field textarea { width: 100%; padding: 10px; border: 1px solid var(--border-color); border-radius: 4px; box-sizing: border-box; }
         
         /* DROPDOWN */
@@ -428,15 +429,15 @@ try {
             <div class="form-grid-modal">
                 <div class="form-field">
                     <label for="c_name" class="required">Firma Adı</label>
-                    <input type="text" id="c_name" name="c_name" required>
+                    <input type="text" id="c_name" name="c_name" class ="form-control" required>
                 </div>
                 <div class="form-field">
                     <label for="name" class="required">Ticari Unvan</label>
-                    <input type="text" id="name" name="name" required>
+                    <input type="text" id="name" name="name" class="form-control" required>
                 </div>
                 <div class="form-field">
                     <label for="address" class="required">Adres</label>
-                    <input type="text" id="address" name="address" required>
+                    <input type="text" id="address" name="address" class="form-control" required>
                 </div>
                 <div class="form-field">
                     <label for="contact_address">İletişim Adresi</label>
@@ -456,7 +457,7 @@ try {
                 </div>
                 <div class="form-field">
                     <label for="c_invoice_address" class="required">Fatura Adresi</label>
-                    <input type="text" id="c_invoice_address" name="c_invoice_address" required>
+                    <input type="text" id="c_invoice_address" name="c_invoice_address" class="form-control" required>
                 </div>
                 <div class="form-field">
                     <label for="authorized_contact_name">Yetkili İletişim Adı</label>
@@ -468,7 +469,7 @@ try {
                 </div>
                 <div class="form-field">
                     <label for="contact_name" class="required">İletişim Kurulacak Kişi</label>
-                    <input type="text" id="contact_name" name="contact_name" required>
+                    <input type="text" id="contact_name" name="contact_name" class="form-control" required>
                 </div>
                 <div class="form-field">
                     <label for="contact_phone">İletişim Telefonu</label>
@@ -476,15 +477,15 @@ try {
                 </div>
                 <div class="form-field">
                     <label for="contact_email" class="required">İletişim E-postası</label>
-                    <input type="email" id="contact_email" name="contact_email" required>
+                    <input type="email" id="contact_email" name="contact_email" class="form-control" required>
                 </div>
                 <div class="form-field">
                     <label for="tax_office" class="required">Vergi Dairesi</label>
-                    <input type="text" id="tax_office" name="tax_office" required>
+                    <input type="text" id="tax_office" name="tax_office" class="form-control" required>
                 </div>
                 <div class="form-field">
                     <label for="tax_number" class="required">Vergi Numarası</label>
-                    <input type="text" id="tax_number" name="tax_number" required>
+                    <input type="text" id="tax_number" name="tax_number" class="form-control" required>
                 </div>
 
                 <div class="form-field">

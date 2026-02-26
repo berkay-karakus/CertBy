@@ -208,6 +208,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                      $plan['linked_cert_id'] = $cert ? $cert['id'] : 0;
                 }
 
+                // EĞER DENETİM GERÇEKLEŞTİYSE, RAPOR DETAYLARINI DA ÇEKELİM
+                if ($plan['audit_status'] === 'Gerçekleşti') {
+                    $stmtRep = $db->prepare("SELECT report_no, audit_date_real, decision FROM audit_report WHERE f_planning_id = ?");
+                    $stmtRep->execute([$id]);
+                    $repData = $stmtRep->fetch(PDO::FETCH_ASSOC);
+                    if ($repData) {
+                        $plan['report_no'] = $repData['report_no'];
+                        $plan['audit_date_real'] = $repData['audit_date_real'];
+                        $plan['report_decision'] = $repData['decision'];
+                    }
+                }
+
                 echo json_encode(['status' => 'success', 'data' => $plan]);
             } else {
                 echo json_encode(['status' => 'error', 'message' => 'Plan bulunamadı.']);
@@ -245,7 +257,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $f_cert_id = null;
             $audit_certtification_no = ''; 
             
-            // --- YENİ MANTIK: Sadece "Ara Tetkik"te Bağlı Sertifika Zorunlu ---
             if ($audit_type === 'ara') {
                 $cert_db_id = intval($_POST['linked_cert_id'] ?? 0);
                 if($cert_db_id <= 0) {
@@ -264,7 +275,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $f_cert_id = $certData['f_cert_id'] ?? null;
             
             } else {
-                // İlk Belgelendirme (ilk) VEYA Yeniden Belgelendirme (yenileme) -> Soyut Belge Türü Seçilmeli
                 $f_cert_id = intval($_POST['cert_type_id'] ?? 0);
                 if($f_cert_id <= 0) {
                     echo json_encode(['status' => 'error', 'message' => 'Lütfen planlanan belge türünü seçiniz.']); exit();
@@ -276,7 +286,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit();
             }
 
-            // Çakışma Kontrolü
             $currentPlanId = ($action === 'update') ? intval($_POST['id'] ?? 0) : 0;
             foreach($auditorIds as $audId) {
                 $checkSql = "SELECT count(*) FROM planning p 
@@ -298,57 +307,74 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
 
-            if ($action === 'add') {
-                $sql = "INSERT INTO planning (f_company_id, f_cert_id, audit_publish_date, audit_end_date, audit_status, audit_certtification_no, f_consult_company_id, audit_link, is_auto_generated, audit_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)";
-                $stmt = $db->prepare($sql);
-                if ($stmt->execute([$f_company_id, $f_cert_id, $start_date, $end_date, $status, $audit_certtification_no, $f_consult_company_id, $link, $audit_type])) {
-                    $newId = $db->lastInsertId();
-                    
-                    $stmtPA = $db->prepare("INSERT INTO planning_auditor (f_planning_id, f_auditor_id) VALUES (?, ?)");
-                    foreach($auditorIds as $aId) { $stmtPA->execute([$newId, intval($aId)]); }
-                    
-                    if (!empty($participants) && is_array($participants)) {
-                        $stmtPart = $db->prepare("INSERT INTO participant (f_planning_id, name, email) VALUES (?, ?, ?)");
-                        foreach ($participants as $p) {
-                            if (!empty($p['name']) && !empty($p['email'])) { $stmtPart->execute([$newId, $p['name'], $p['email']]); }
-                        }
-                    }
+            $db->beginTransaction(); // Veritabanı tutarlılığı için Transaction başlatıyoruz
+
+            try {
+                if ($action === 'add') {
+                    $sql = "INSERT INTO planning (f_company_id, f_cert_id, audit_publish_date, audit_end_date, audit_status, audit_certtification_no, f_consult_company_id, audit_link, is_auto_generated, audit_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)";
+                    $stmt = $db->prepare($sql);
+                    $stmt->execute([$f_company_id, $f_cert_id, $start_date, $end_date, $status, $audit_certtification_no, $f_consult_company_id, $link, $audit_type]);
+                    $targetPlanId = $db->lastInsertId();
+                    $actionMessage = 'Denetim planı başarıyla oluşturuldu.';
                     
                     $stmtCN = $db->prepare("SELECT c_name FROM company WHERE id = ?");
                     $stmtCN->execute([$f_company_id]);
                     $logCompName = $stmtCN->fetchColumn();
                     $logStmt = $db->prepare("INSERT INTO general_log (user_id, company_id, cert_id, log_type, content) VALUES (?, ?, 0, 'Denetim Planlama', ?)");
                     $logStmt->execute([$_SESSION['user_id'], $f_company_id, "Yeni denetim planlandı: $logCompName ($start_date)"]);
-                    
-                    echo json_encode(['status' => 'success', 'message' => 'Denetim planı başarıyla oluşturuldu.']);
-                } else { echo json_encode(['status' => 'error', 'message' => 'Kayıt hatası.']); }
-                exit();
-            }
+                }
 
-            if ($action === 'update') {
-                $id = intval($_POST['id'] ?? 0);
-                $sql = "UPDATE planning SET f_company_id=?, f_cert_id=?, audit_publish_date=?, audit_end_date=?, audit_status=?, audit_certtification_no=?, f_consult_company_id=?, audit_link=?, audit_type=? WHERE id=?";
-                $stmt = $db->prepare($sql);
-                if ($stmt->execute([$f_company_id, $f_cert_id, $start_date, $end_date, $status, $audit_certtification_no, $f_consult_company_id, $link, $audit_type, $id])) {
+                if ($action === 'update') {
+                    $targetPlanId = intval($_POST['id'] ?? 0);
+                    $sql = "UPDATE planning SET f_company_id=?, f_cert_id=?, audit_publish_date=?, audit_end_date=?, audit_status=?, audit_certtification_no=?, f_consult_company_id=?, audit_link=?, audit_type=? WHERE id=?";
+                    $stmt = $db->prepare($sql);
+                    $stmt->execute([$f_company_id, $f_cert_id, $start_date, $end_date, $status, $audit_certtification_no, $f_consult_company_id, $link, $audit_type, $targetPlanId]);
                     
-                    $db->prepare("DELETE FROM planning_auditor WHERE f_planning_id = ?")->execute([$id]);
-                    $stmtPA = $db->prepare("INSERT INTO planning_auditor (f_planning_id, f_auditor_id) VALUES (?, ?)");
-                    foreach($auditorIds as $aId) { $stmtPA->execute([$id, intval($aId)]); }
-
-                    $db->prepare("DELETE FROM participant WHERE f_planning_id = ?")->execute([$id]);
-                    if (!empty($participants) && is_array($participants)) {
-                        $stmtPart = $db->prepare("INSERT INTO participant (f_planning_id, name, email) VALUES (?, ?, ?)");
-                        foreach ($participants as $p) {
-                            if (!empty($p['name']) && !empty($p['email'])) { $stmtPart->execute([$id, $p['name'], $p['email']]); }
-                        }
-                    }
+                    $db->prepare("DELETE FROM planning_auditor WHERE f_planning_id = ?")->execute([$targetPlanId]);
+                    $db->prepare("DELETE FROM participant WHERE f_planning_id = ?")->execute([$targetPlanId]);
 
                     $logStmt = $db->prepare("INSERT INTO general_log (user_id, company_id, cert_id, log_type, content) VALUES (?, ?, 0, 'Denetim Planlama', ?)");
-                    $logStmt->execute([$_SESSION['user_id'], $f_company_id, "Denetim güncellendi: $id"]);
-                    echo json_encode(['status' => 'success', 'message' => 'Denetim planı başarıyla güncellendi.']);
-                } else { echo json_encode(['status' => 'error', 'message' => 'Güncelleme hatası.']); }
-                exit();
+                    $logStmt->execute([$_SESSION['user_id'], $f_company_id, "Denetim güncellendi: $targetPlanId"]);
+                    $actionMessage = 'Denetim planı başarıyla güncellendi.';
+                }
+
+                // İlişkisel Kayıtlar (Denetçiler ve Katılımcılar)
+                $stmtPA = $db->prepare("INSERT INTO planning_auditor (f_planning_id, f_auditor_id) VALUES (?, ?)");
+                foreach($auditorIds as $aId) { $stmtPA->execute([$targetPlanId, intval($aId)]); }
+                
+                if (!empty($participants) && is_array($participants)) {
+                    $stmtPart = $db->prepare("INSERT INTO participant (f_planning_id, name, email) VALUES (?, ?, ?)");
+                    foreach ($participants as $p) {
+                        if (!empty($p['name']) && !empty($p['email'])) { $stmtPart->execute([$targetPlanId, $p['name'], $p['email']]); }
+                    }
+                }
+
+                // --- YENİ EKLENEN RAPORLAMA MANTIĞI ---
+                // Eğer durum 'Gerçekleşti' ise, audit_report tablosuna kayıt atılır/güncellenir
+                if ($status === 'Gerçekleşti') {
+                    $r_no = $_POST['report_no'] ?? '';
+                    $r_date = $_POST['audit_date_real'] ?? '';
+                    $r_dec = $_POST['report_decision'] ?? '';
+
+                    $checkRep = $db->prepare("SELECT id FROM audit_report WHERE f_planning_id = ?");
+                    $checkRep->execute([$targetPlanId]);
+                    if ($checkRep->rowCount() > 0) {
+                        $db->prepare("UPDATE audit_report SET report_no=?, audit_date_real=?, decision=? WHERE f_planning_id=?")
+                           ->execute([$r_no, $r_date, $r_dec, $targetPlanId]);
+                    } else {
+                        $db->prepare("INSERT INTO audit_report (f_planning_id, report_no, audit_date_real, decision) VALUES (?, ?, ?, ?)")
+                           ->execute([$targetPlanId, $r_no, $r_date, $r_dec]);
+                    }
+                }
+
+                $db->commit();
+                echo json_encode(['status' => 'success', 'message' => $actionMessage]);
+
+            } catch(Exception $e) {
+                $db->rollBack();
+                echo json_encode(['status' => 'error', 'message' => 'İşlem hatası: ' . $e->getMessage()]);
             }
+            exit();
         }
 
     } catch (Exception $e) { echo json_encode(['status' => 'error', 'message' => $e->getMessage()]); exit(); }
@@ -424,7 +450,7 @@ try {
     <script src='https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js'></script>
 
     <style>
-        /* STİLLER AYNI (Kısaltıldı) */
+        /* STİLLER AYNI */
         :root { --primary-color: #007bff; --secondary-color: #6c757d; --background-color: #f8f9fa; --card-background: #ffffff; --border-color: #e9ecef; --success-color: #28a745; --danger-color: #dc3545; --dropdown-hover: #f1f3f5; --dropdown-shadow: rgba(0,0,0,0.1); }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: var(--background-color); margin: 0; padding: 20px; color: #333; }
         .container { max-width: 98%; margin: 0 auto; background-color: var(--card-background); padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
@@ -464,7 +490,7 @@ try {
         .full-width { grid-column: 1 / -1; } 
         .form-field { margin-bottom: 15px; }
         .form-field label { display: block; margin-bottom: 5px; font-weight: 500; color: #495057; }
-        .required { color: var(--danger-color); }
+        label.required::after { content: " *"; color: var(--danger-color); }
         .form-control, .form-field input, .form-field textarea, .form-field select { width: 100%; padding: 10px; border: 1px solid var(--border-color); border-radius: 4px; box-sizing: border-box; }
         .dropdown { position: relative; display: inline-block; width: 100%; }
         .dropbtn { background-color: #fff; color: #333; padding: 10px; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; width: 100%; text-align: left; display: flex; justify-content: space-between; align-items: center; box-sizing: border-box; }
@@ -807,6 +833,30 @@ try {
                     <input type="text" id="audit_link" name="audit_link" class="form-control" required>
                 </div>
 
+                <div id="reportFieldsRow" class="form-grid-modal full-width" style="display:none; background:#e8f5e9; padding:15px; border-radius:4px; border:1px solid #c3e6cb; margin-top:15px;">
+                    <h3 style="grid-column: 1 / -1; margin-top:0; color:#155724; font-size:1.1rem; border-bottom:1px solid #c3e6cb; padding-bottom:5px;">Rapor Detayları</h3>
+                    <div class="form-field">
+                        <label class="required">Rapor Numarası</label>
+                        <input type="text" id="report_no" name="report_no" class="form-control" placeholder="Örn: REP-2026-001">
+                    </div>
+                    <div class="form-field">
+                        <label class="required">Gerçekleşen Denetim Tarihi</label>
+                        <input type="date" id="audit_date_real" name="audit_date_real" class="form-control">
+                    </div>
+                    <div class="form-field full-width">
+                        <label class="required">Denetim Kararı</label>
+                        <select id="report_decision" name="report_decision" class="form-control">
+                            <option value="">Seçiniz...</option>
+                            <option value="Belgelendirme Onaylandı">Belgelendirme Onaylandı</option>
+                            <option value="Devam Kararı">Mevcut Belgenin Devamı</option>
+                            <option value="Majör Uygunsuzluk">Majör Uygunsuzluk (Takip Gerekli)</option>
+                            <option value="Minör Uygunsuzluk">Minör Uygunsuzluk</option>
+                            <option value="Belge Askıya Alındı">Belge Askıya Alındı</option>
+                            <option value="Belge İptal">Belge İptal Edildi</option>
+                        </select>
+                    </div>
+                </div>
+
                 <div class="form-field full-width" style="border-top:1px solid #eee; padding-top:10px;">
                     <label>Katılımcılar</label>
                     <div id="participantList"></div>
@@ -886,7 +936,6 @@ try {
     let dataTable;
 
     $(document).ready(function() {
-        // Initial State from URL
         const urlParams = new URLSearchParams(window.location.search);
         if(urlParams.get('start_date')) document.getElementById('f_start_date').value = urlParams.get('start_date');
         if(urlParams.get('end_date')) document.getElementById('f_end_date').value = urlParams.get('end_date');
@@ -912,13 +961,12 @@ try {
             "pageLength": 10,
             "dom": 'rtip',
             "language": { "url": "//cdn.datatables.net/plug-ins/1.13.6/i18n/tr.json" },
-            "columnDefs": [ { "orderable": false, "targets": 9 } ], // İşlemler (index 9)
+            "columnDefs": [ { "orderable": false, "targets": 9 } ],
             "autoWidth": false
         });
         $('#customSearch').on('keyup', function() { dataTable.search(this.value).draw(); });
     });
 
-    // --- POPSTATE EVENT LISTENER (BACK BUTTON) ---
     window.addEventListener('popstate', function(event) {
         const urlParams = new URLSearchParams(window.location.search);
         
@@ -963,7 +1011,6 @@ try {
         if(btn) btn.innerHTML = text + ' <span class="arrow-down">&#9662;</span>';
     }
 
-    // --- FİLTRELEME (AJAX) ---
     function applyFilters(pushToHistory = true) {
         const start_date = document.getElementById('f_start_date').value;
         const end_date = document.getElementById('f_end_date').value;
@@ -972,7 +1019,6 @@ try {
         const auditorId = document.getElementById('f_auditor_id') ? document.getElementById('f_auditor_id').value : '';
         const auditStatus = document.getElementById('f_audit_status').value;
 
-        // URL Güncelleme
         const newUrl = new URL(window.location.href);
         if(start_date) newUrl.searchParams.set('start_date', start_date); else newUrl.searchParams.delete('start_date');
         if(end_date) newUrl.searchParams.set('end_date', end_date); else newUrl.searchParams.delete('end_date');
@@ -987,7 +1033,6 @@ try {
             window.history.replaceState(null, '', newUrl);
         }
 
-        // POST ile Veri Çek
         const fd = new FormData();
         fd.append('action', 'filter_audits');
         fd.append('start_date', start_date);
@@ -1052,7 +1097,6 @@ try {
                 });
                 dataTable.draw();
 
-                // Takvimi Güncelle (Eğer aktifse)
                 if(calendarInitialized && document.getElementById('calendar').style.display !== 'none') {
                     initCalendar();
                 }
@@ -1078,11 +1122,10 @@ try {
         document.getElementById('f_auditStatusBtn').innerHTML = 'Tümü <span class="arrow-down">&#9662;</span>';
 
         const newUrl = window.location.href.split('?')[0];
-        window.history.pushState({path: newUrl}, '', newUrl); // PUSH STATE
+        window.history.pushState({path: newUrl}, '', newUrl); 
         applyFilters(false);
     }
 
-    // --- MEVCUT JS FONKSİYONLARI ---
     function selectFilterOption(inputId, value, text, dropdownId) {
         document.getElementById(inputId).value = value;
         const btnId = dropdownId.replace('Dropdown', 'Btn');
@@ -1157,11 +1200,29 @@ try {
         }
     }
 
+    // --- YENİ EKLENEN RAPOR ALANLARINI GÖSTERME/GİZLEME MANTIĞI ---
+    function toggleReportFields() {
+        const status = document.getElementById('audit_status').value;
+        const reportDiv = document.getElementById('reportFieldsRow');
+        if (status === 'Gerçekleşti') {
+            reportDiv.style.display = 'grid';
+            document.getElementById('report_no').required = true;
+            document.getElementById('audit_date_real').required = true;
+            document.getElementById('report_decision').required = true;
+        } else {
+            reportDiv.style.display = 'none';
+            document.getElementById('report_no').required = false;
+            document.getElementById('audit_date_real').required = false;
+            document.getElementById('report_decision').required = false;
+        }
+    }
+
     function selectOption(inputId, value, text, dropdownId) {
         document.getElementById(inputId).value = value;
         const btn = document.getElementById(dropdownId).closest('.dropdown').querySelector('.dropbtn');
         btn.innerHTML = text + ' <span class="arrow-down">&#9662;</span>';
         if(inputId === 'company_id') loadCompanyCerts(value);
+        if(inputId === 'audit_status') toggleReportFields(); // Durum değiştiğinde Rapor detaylarını kontrol et
     }
 
     function addAuditor(id, name) {
@@ -1192,14 +1253,12 @@ try {
 
     function toggleCertSelection() {
         const type = document.getElementById('audit_type').value;
-        // İŞ MANTIĞI GÜNCELLEMESİ (DÜZELTİLDİ): Sadece Ara Tetkik (ara) için Sertifika Zorunlu
         if (type === 'ara') {
             document.getElementById('linkedCertDiv').style.display = 'block';
             document.getElementById('manualCertDiv').style.display = 'none';
             document.getElementById('linked_cert_id').required = true;
             document.getElementById('cert_type_id').required = false;
         } else {
-            // İlk Belgelendirme (ilk) VE Yeniden Belgelendirme (yenileme) -> Soyut Belge Türü
             document.getElementById('linkedCertDiv').style.display = 'none';
             document.getElementById('manualCertDiv').style.display = 'block';
             document.getElementById('linked_cert_id').required = false;
@@ -1266,6 +1325,12 @@ try {
             else if(btn.id === 'auditTypeBtn') btn.innerHTML = 'İlk Belgelendirme <span class="arrow-down">&#9662;</span>';
             else if(!btn.id.includes('auditor')) btn.innerHTML = 'Seçiniz... <span class="arrow-down">&#9662;</span>';
         });
+
+        // Rapor alanlarını sıfırla ve gizle
+        document.getElementById('reportFieldsRow').style.display = 'none';
+        document.getElementById('report_no').value = '';
+        document.getElementById('audit_date_real').value = '';
+        document.getElementById('report_decision').value = '';
         
         selectedAuditors = [];
         renderAuditors();
@@ -1301,6 +1366,14 @@ try {
                         toggleCertSelection();
 
                         setDropdownByValue('audit_status', d.audit_status, 'statusDropdown');
+                        toggleReportFields(); // Eğer Gerçekleşti olarak geliyorsa Rapor alanlarını açar
+                        
+                        // Rapor detaylarını yükle
+                        if(d.audit_status === 'Gerçekleşti') {
+                            document.getElementById('report_no').value = d.report_no || '';
+                            document.getElementById('audit_date_real').value = d.audit_date_real || '';
+                            document.getElementById('report_decision').value = d.report_decision || '';
+                        }
                         
                         if(d.company_id) {
                             setDropdownByValue('company_id', d.company_id, 'companyDropdown');
@@ -1384,6 +1457,7 @@ try {
         }
     }
     
+    // --- E-POSTA İŞLEMLERİ ---
     function openEmailModal(planId, auditType) {
         const modal = document.getElementById('emailModal');
         const form = document.getElementById('emailForm');
@@ -1527,8 +1601,6 @@ try {
             e.target.value = !x[2] ? x[1] : '(' + x[1] + ') ' + x[2] + (x[3] ? '-' + x[3] : '');
         });
     }
-
-    
 </script>
 </body>
 </html>

@@ -12,17 +12,28 @@ $userRole = strtolower($_SESSION['role_code']);
 $userId = $_SESSION['user_id'];
 $isAuditor = ($userRole === 'auditor');
 
+$companies = $db->query("SELECT id, c_name FROM company ORDER BY c_name ASC")->fetchAll(PDO::FETCH_ASSOC);
+$certs = $db->query("SELECT id, name FROM cert ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
+$statuses = $db->query("SELECT id, status FROM certification_status ORDER BY id ASC")->fetchAll(PDO::FETCH_ASSOC);
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Content-Type: application/json');
 
     try {
         $action = $_POST['action'] ?? '';
 
-        // --- 1. DİNAMİK DENETİM ÖNGÖRÜ RAPORU ---
+        // Dinamik Denetim Öngörü Raporu 
         if ($action === 'forecast_report') {
+            
+            // Filtre Parametrelerini Al
             $daysFilter = intval($_POST['days_filter'] ?? 0); 
             $typeFilter = $_POST['type_filter'] ?? ''; 
-            $planningFilter = $_POST['planning_filter'] ?? ''; // YENİ EKLENDİ
+            $planningFilter = $_POST['planning_filter'] ?? ''; 
+            $companyFilter = $_POST['company_filter'] ?? ''; 
+            $certFilter = $_POST['cert_filter'] ?? ''; 
+            $statusFilter = $_POST['status_filter'] ?? ''; 
+            $startDate = $_POST['start_date'] ?? ''; 
+            $endDate = $_POST['end_date'] ?? ''; 
             
             $sql = "
             SELECT 
@@ -35,10 +46,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             FROM (
                 SELECT 
                     c.id as cert_db_id,
+                    comp.id as company_id,
                     comp.c_name,
+                    ct.id as cert_id,
                     ct.name as cert_name,
                     c.certno,
                     ct.period,
+                    c.status as cert_status_id,
+                    cs.status as cert_status_name,
                     
                     CASE 
                         WHEN ct.surveillance_count >= 1 AND TIMESTAMPDIFF(MONTH, c.publish_date, CURDATE()) < ct.surveillance_frequency THEN 'Ara Tetkik 1'
@@ -64,16 +79,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 FROM certification c
                 JOIN company comp ON c.f_company_id = comp.id
                 JOIN cert ct ON c.f_cert_id = ct.id
-                WHERE c.status = 1
+                LEFT JOIN certification_status cs ON c.status = cs.id
 
                 UNION ALL
 
                 SELECT 
                     0 as cert_db_id,
+                    comp.id as company_id,
                     comp.c_name,
+                    ct.id as cert_id,
                     ct.name as cert_name,
                     'Henüz Yok (Plan Aşamasında)' as certno,
                     ct.period,
+                    0 as cert_status_id,
+                    'İlk Belgelendirme Sürecinde' as cert_status_name,
                     'İlk Belgelendirme' as next_audit_type,
                     p.audit_publish_date as target_date,
                     'initial' as type_code,
@@ -94,31 +113,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             WHERE 1=1
             ";
 
-            // YENİ FİLTRE MANTIĞI: PLANLAMA DURUMU
+            $params = [];
+
+            // --- FİLTRELEMELER ---
+
+            // Planlama Durumu Filtresi
             if ($planningFilter === 'planned') {
-                // Sadece planlanmış olanlar (veya İlk Belgelendirme olanlar ki onlar zaten planlıdır)
                 $sql .= " AND (p.id IS NOT NULL OR MainData.type_code = 'initial') ";
             } elseif ($planningFilter === 'unplanned') {
-                // Sadece planlanmamış olanlar (ve İlk Belgelendirme OLMAYANLAR)
                 $sql .= " AND p.id IS NULL AND MainData.type_code != 'initial' ";
             }
 
-            // Geriye dönük 2 aydan eskileri getirme (Çok eski verileri elemek için)
-            $sql .= " AND target_date >= DATE_SUB(CURDATE(), INTERVAL 2 MONTH) "; 
-
-            $params = [];
-            
+            // Vade (Gün) Filtresi
             if ($daysFilter > 0) {
-                $sql .= " AND DATEDIFF(target_date, CURDATE()) BETWEEN 0 AND ?";
+                $sql .= " AND DATEDIFF(MainData.target_date, CURDATE()) BETWEEN 0 AND ?";
                 $params[] = $daysFilter;
             }
 
+            // İşlem Türü Filtresi
             if (!empty($typeFilter)) {
-                $sql .= " AND type_code = ?";
+                $sql .= " AND MainData.type_code = ?";
                 $params[] = $typeFilter;
             }
 
-            $sql .= " ORDER BY target_date ASC";
+            // Firma Filtresi
+            if (!empty($companyFilter)) {
+                $sql .= " AND MainData.company_id = ?";
+                $params[] = $companyFilter;
+            }
+
+            // Belge Türü Filtresi
+            if (!empty($certFilter)) {
+                $sql .= " AND MainData.cert_id = ?";
+                $params[] = $certFilter;
+            }
+
+            // Belge Durumu Filtresi
+            if ($statusFilter !== '') {
+                $sql .= " AND MainData.cert_status_id = ?";
+                $params[] = $statusFilter;
+            }
+
+            // Tarih Aralığı Filtresi
+            if (!empty($startDate) && !empty($endDate)) {
+                $sql .= " AND MainData.target_date BETWEEN ? AND ?";
+                $params[] = $startDate;
+                $params[] = $endDate;
+            } elseif (!empty($startDate)) {
+                $sql .= " AND MainData.target_date >= ?";
+                $params[] = $startDate;
+            } elseif (!empty($endDate)) {
+                $sql .= " AND MainData.target_date <= ?";
+                $params[] = $endDate;
+            } else {
+                // Özel bir tarih seçilmediyse çok eski (2 aydan eski) verileri gizleme kuralı (Opsiyonel)
+                $sql .= " AND MainData.target_date >= DATE_SUB(CURDATE(), INTERVAL 2 MONTH) "; 
+            }
+
+            $sql .= " ORDER BY MainData.target_date ASC";
 
             $stmt = $db->prepare($sql);
             $stmt->execute($params);
@@ -168,7 +220,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit();
         }
 
-        // --- 2. RAPOR ARŞİVİ ---
+        // Rapor Arşivi
         if ($action === 'filter_audit_reports') {
             $f_start = $_POST['start_date'] ?? '';
             $f_end = $_POST['end_date'] ?? '';
@@ -239,12 +291,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .tab-content { display: none; animation: fadeIn 0.3s; }
         .tab-content.active { display: block; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        .report-controls { background: #eef2f7; padding: 15px; border-radius: 6px; margin-bottom: 20px; display: flex; gap: 15px; align-items: flex-end; border: 1px solid #dce4ec; }
-        .control-group { display: flex; flex-direction: column; width: 250px; }
-        .control-group label { font-weight: 600; font-size: 0.9rem; margin-bottom: 5px; color: #555; }
-        .form-select, .form-control { padding: 10px; border: 1px solid #ccc; border-radius: 4px; background: #fff; font-size: 0.95rem; width: 100%; cursor: pointer; box-sizing: border-box; }
-        .btn-report { background: var(--primary-color); color: #fff; border: none; padding: 10px 25px; border-radius: 4px; cursor: pointer; font-weight: 600; height: 42px; width: 100%; transition: 0.2s; }
+        
+        /* Grid Layout for Filters */
+        .report-controls { background: #eef2f7; padding: 20px; border-radius: 6px; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; align-items: end; border: 1px solid #dce4ec; }
+        .control-group { display: flex; flex-direction: column; width: 100%; }
+        .control-group label { font-weight: 600; font-size: 0.85rem; margin-bottom: 6px; color: #555; }
+        .form-select, .form-control { padding: 9px; border: 1px solid #ccc; border-radius: 4px; background: #fff; font-size: 0.9rem; width: 100%; box-sizing: border-box; }
+        .btn-report { background: var(--primary-color); color: #fff; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-weight: 600; height: 38px; width: 100%; transition: 0.2s; }
         .btn-report:hover { background: #0056b3; }
+        
         .table-responsive { overflow-x: auto; }
         table.dataTable thead th { background-color: #f8f9fa; color: #495057; font-weight: 600; border-bottom: 2px solid #e9ecef; }
         .badge { padding: 5px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; color: #fff; display: inline-block; min-width: 80px; text-align: center; }
@@ -279,10 +334,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     <div id="forecastTab" class="tab-content active">
         <div class="alert" style="background:#e3f2fd; color:#0c5460; padding:15px; border-radius:6px; margin-bottom:20px; border:1px solid #bee5eb;">
-            <i class="fa fa-info-circle"></i> Bu rapor; mevcut sertifikaların <strong>Ara Tetkik/Yenileme</strong> tarihlerini ve planlanmış <strong>İlk Belgelendirme</strong> süreçlerini birleştirir.
+            <i class="fa fa-info-circle"></i> Aşağıdaki filtreleri kullanarak spesifik bir firmaya, belgeye veya tarih aralığına göre <strong>Birleşik Filtrelemeler</strong> yapabilirsiniz.
         </div>
 
         <div class="report-controls">
+            <div class="control-group">
+                <label>Firma</label>
+                <select id="company_filter" class="form-select">
+                    <option value="">Tümü</option>
+                    <?php foreach($companies as $c): ?>
+                        <option value="<?= $c['id'] ?>"><?= htmlspecialchars($c['c_name']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Belge Türü</label>
+                <select id="cert_filter" class="form-select">
+                    <option value="">Tümü</option>
+                    <?php foreach($certs as $ct): ?>
+                        <option value="<?= $ct['id'] ?>"><?= htmlspecialchars($ct['name']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Belge Durumu</label>
+                <select id="status_filter" class="form-select">
+                    <option value="">Tümü</option>
+                    <option value="0">İlk Belgelendirme Sürecinde</option>
+                    <?php foreach($statuses as $s): ?>
+                        <option value="<?= $s['id'] ?>"><?= htmlspecialchars($s['status']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
             <div class="control-group">
                 <label>Planlama Durumu</label>
                 <select id="planning_filter" class="form-select">
@@ -293,7 +379,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </div>
             
             <div class="control-group">
-                <label>Vade Durumu</label>
+                <label>Vade (Kalan Süre)</label>
                 <select id="days_filter" class="form-select">
                     <option value="0">Tümü</option>
                     <option value="30">Acil (30 Gün)</option>
@@ -311,6 +397,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <option value="surveillance">Ara Tetkik</option>
                     <option value="recertification">Yeniden Belgelendirme</option>
                 </select>
+            </div>
+
+            <div class="control-group">
+                <label>Hedef Başlangıç</label>
+                <input type="date" id="start_date" class="form-control">
+            </div>
+            <div class="control-group">
+                <label>Hedef Bitiş</label>
+                <input type="date" id="end_date" class="form-control">
             </div>
             
             <div class="control-group">
@@ -334,7 +429,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     </div>
 
     <div id="historyTab" class="tab-content">
-        <div class="report-controls">
+        <div class="report-controls" style="grid-template-columns: repeat(3, 1fr);">
             <div class="control-group"><label>Başlangıç:</label><input type="date" id="ar_start" class="form-control"></div>
             <div class="control-group"><label>Bitiş:</label><input type="date" id="ar_end" class="form-control"></div>
             <div class="control-group">
@@ -405,17 +500,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     function loadForecastReport() {
-        const days = document.getElementById('days_filter').value;
-        const type = document.getElementById('type_filter').value;
-        const planning = document.getElementById('planning_filter').value;
-
+        // Form verilerini topla
         const fd = new FormData();
         fd.append('action', 'forecast_report');
-        fd.append('days_filter', days);
-        fd.append('type_filter', type);
-        fd.append('planning_filter', planning);
+        fd.append('company_filter', document.getElementById('company_filter').value);
+        fd.append('cert_filter', document.getElementById('cert_filter').value);
+        fd.append('status_filter', document.getElementById('status_filter').value);
+        fd.append('planning_filter', document.getElementById('planning_filter').value);
+        fd.append('days_filter', document.getElementById('days_filter').value);
+        fd.append('type_filter', document.getElementById('type_filter').value);
+        fd.append('start_date', document.getElementById('start_date').value);
+        fd.append('end_date', document.getElementById('end_date').value);
 
-        fetch('report.php', { method: 'POST', body: fd })
+        // Dinamik olarak mevcut dosyaya post at
+        fetch(window.location.href, { method: 'POST', body: fd })
         .then(r => r.json())
         .then(res => {
             if(res.status === 'error') { alert(res.message); return; }
@@ -423,10 +521,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             tableForecast.clear();
             if(res.status === 'success' && res.data.length > 0) {
                 res.data.forEach(row => {
+                    const statusName = row.cert_status_name || 'Bilinmiyor';
                     const certInfo = `
                         <div class="cert-no-main">${row.certno}</div>
                         <div class="cert-name-sub">${row.cert_name}</div>
-                        <div class="cert-info-sub">Periyot: ${row.period} Yıl</div>
+                        <div class="cert-info-sub">Periyot: ${row.period} Yıl | Durum: <b>${statusName}</b></div>
                     `;
                     
                     tableForecast.row.add([
@@ -443,33 +542,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     function loadAuditReports() {
-        const start = document.getElementById('ar_start').value;
-        const end = document.getElementById('ar_end').value;
+    const start = document.getElementById('ar_start').value;
+    const end = document.getElementById('ar_end').value;
 
-        const fd = new FormData();
-        fd.append('action', 'filter_audit_reports');
-        fd.append('start_date', start);
-        fd.append('end_date', end);
+    const fd = new FormData();
+    fd.append('action', 'filter_audit_reports');
+    fd.append('start_date', start);
+    fd.append('end_date', end);
 
-        fetch('report.php', { method: 'POST', body: fd })
-        .then(r => r.json())
-        .then(res => {
-            tableHistory.clear();
-            if(res.status === 'success' && res.data.length > 0) {
-                res.data.forEach(row => {
-                    tableHistory.row.add([
-                        row.report_no || '-',
-                        row.c_name || '-',
-                        row.audit_type || '-',
-                        row.audit_date_real || '-',
-                        row.decision || '-',
-                        '<button class="action-button" style="background:#17a2b8; border:none; padding:5px 10px; border-radius:4px; color:#fff;" onclick="alert(\'Rapor: '+row.report_no+'\')"><i class="fa fa-eye"></i></button>'
-                    ]);
-                });
-            }
-            tableHistory.draw();
-        });
-    }
+    fetch(window.location.href, { method: 'POST', body: fd })
+    .then(r => r.json())
+    .then(res => {
+        tableHistory.clear();
+        if(res.status === 'success' && res.data.length > 0) {
+            res.data.forEach(row => {
+                let typeDisplay = row.audit_type;
+                if(typeDisplay === 'ilk') typeDisplay = 'İlk Belgelendirme';
+                else if(typeDisplay === 'ara') typeDisplay = 'Ara Tetkik';
+                else if(typeDisplay === 'yenileme') typeDisplay = 'Yeniden Belgelendirme';
+                
+                tableHistory.row.add([
+                    row.report_no || '-',
+                    row.c_name || '-',
+                    typeDisplay || '-',
+                    row.audit_date_real || '-',
+                    row.decision || '-',
+                    '<button class="action-button" style="background:#17a2b8; border:none; padding:5px 10px; border-radius:4px; color:#fff;" onclick="alert(\'Rapor: '+row.report_no+'\')"><i class="fa fa-eye"></i></button>'
+                ]);
+            });
+        }
+        tableHistory.draw();
+    });
+}
 </script>
 
 </body>

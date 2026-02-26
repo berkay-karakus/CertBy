@@ -338,7 +338,7 @@ try {
         .form-grid-modal { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         .form-field { margin-bottom: 15px; }
         .form-field label { display: block; margin-bottom: 5px; font-weight: 500; color: #495057; }
-        .required { color: var(--danger-color); }
+        label.required::after { content: " *"; color: var(--danger-color); }
         .form-field input, .form-field select, .form-field textarea { width: 100%; padding: 10px; border: 1px solid var(--border-color); border-radius: 4px; box-sizing: border-box; }
         
         /* DROPDOWN */
@@ -453,9 +453,9 @@ try {
         <table id="certTable">
             <thead>
                 <tr>
-                    <th>Firma</th>
-                    <th>Belge Türü</th>
                     <th>Belge No</th>
+                    <th>Belge Türü</th>
+                    <th>Firma</th>
                     <th>Bitiş Tarihi</th>
                     <th>Durum</th>
                     <?php if ($canManage): ?> <th style="width: 150px;">İşlemler</th> <?php endif; ?>
@@ -465,9 +465,9 @@ try {
                 <?php if (!empty($certifications)): ?>
                     <?php foreach ($certifications as $cert): ?>
                     <tr id="row-<?php echo $cert['id']; ?>">
-                        <td><?php echo htmlspecialchars($cert['company_name'] ?? ''); ?></td>
-                        <td><?php echo htmlspecialchars($cert['cert_name'] ?? ''); ?></td>
                         <td><?php echo htmlspecialchars($cert['certno'] ?? ''); ?></td>
+                        <td><?php echo htmlspecialchars($cert['cert_name'] ?? ''); ?></td>
+                        <td><?php echo htmlspecialchars($cert['company_name'] ?? ''); ?></td>
                         <td><?php echo htmlspecialchars($cert['end_date'] ?? ''); ?></td>
                         <td>
                             <?php 
@@ -925,7 +925,6 @@ try {
     function submitForm(e) {
         e.preventDefault();
 
-        // Tarih Kontrolü
         const publishDateInput = document.getElementById('publish_date').value;
         if (publishDateInput) {
             const selectedDate = new Date(publishDateInput);
