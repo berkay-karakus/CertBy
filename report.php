@@ -12,6 +12,7 @@ $userRole = strtolower($_SESSION['role_code']);
 $userId = $_SESSION['user_id'];
 $isAuditor = ($userRole === 'auditor');
 
+// --- ARAYÜZ İÇİN DROPDOWN VERİLERİNİN ÇEKİLMESİ ---
 $companies = $db->query("SELECT id, c_name FROM company ORDER BY c_name ASC")->fetchAll(PDO::FETCH_ASSOC);
 $certs = $db->query("SELECT id, name FROM cert ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
 $statuses = $db->query("SELECT id, status FROM certification_status ORDER BY id ASC")->fetchAll(PDO::FETCH_ASSOC);
@@ -22,7 +23,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
         $action = $_POST['action'] ?? '';
 
-        // Dinamik Denetim Öngörü Raporu 
+        // --- 1. DİNAMİK DENETİM ÖNGÖRÜ RAPORU ---
         if ($action === 'forecast_report') {
             
             // Filtre Parametrelerini Al
@@ -115,46 +116,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $params = [];
 
-            // --- FİLTRELEMELER ---
-
-            // Planlama Durumu Filtresi
             if ($planningFilter === 'planned') {
                 $sql .= " AND (p.id IS NOT NULL OR MainData.type_code = 'initial') ";
             } elseif ($planningFilter === 'unplanned') {
                 $sql .= " AND p.id IS NULL AND MainData.type_code != 'initial' ";
             }
 
-            // Vade (Gün) Filtresi
             if ($daysFilter > 0) {
                 $sql .= " AND DATEDIFF(MainData.target_date, CURDATE()) BETWEEN 0 AND ?";
                 $params[] = $daysFilter;
             }
 
-            // İşlem Türü Filtresi
             if (!empty($typeFilter)) {
                 $sql .= " AND MainData.type_code = ?";
                 $params[] = $typeFilter;
             }
 
-            // Firma Filtresi
             if (!empty($companyFilter)) {
                 $sql .= " AND MainData.company_id = ?";
                 $params[] = $companyFilter;
             }
 
-            // Belge Türü Filtresi
             if (!empty($certFilter)) {
                 $sql .= " AND MainData.cert_id = ?";
                 $params[] = $certFilter;
             }
 
-            // Belge Durumu Filtresi
             if ($statusFilter !== '') {
                 $sql .= " AND MainData.cert_status_id = ?";
                 $params[] = $statusFilter;
             }
 
-            // Tarih Aralığı Filtresi
             if (!empty($startDate) && !empty($endDate)) {
                 $sql .= " AND MainData.target_date BETWEEN ? AND ?";
                 $params[] = $startDate;
@@ -166,7 +158,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $sql .= " AND MainData.target_date <= ?";
                 $params[] = $endDate;
             } else {
-                // Özel bir tarih seçilmediyse çok eski (2 aydan eski) verileri gizleme kuralı (Opsiyonel)
                 $sql .= " AND MainData.target_date >= DATE_SUB(CURDATE(), INTERVAL 2 MONTH) "; 
             }
 
@@ -176,6 +167,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt->execute($params);
             $data = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+            // PHP tarafında oluşturulan HTML blockları, 
+            // sadece tarih ve integer içerdiği için XSS açısından güvenlidir.
             foreach($data as &$row) {
                 $row['formatted_target'] = date('d.m.Y', strtotime($row['target_date']));
                 $days = (new DateTime($row['target_date']))->diff(new DateTime())->days;
@@ -220,40 +213,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit();
         }
 
-        // Rapor Arşivi
+        // --- 2. RAPOR ARŞİVİ ---
         if ($action === 'filter_audit_reports') {
             $f_start = $_POST['start_date'] ?? '';
             $f_end = $_POST['end_date'] ?? '';
             
-            try {
-                $sql = "SELECT ar.*, c.c_name, p.audit_type 
-                        FROM audit_report ar
-                        JOIN planning p ON ar.f_planning_id = p.id
-                        JOIN company c ON p.f_company_id = c.id
-                        WHERE 1=1";
-                
-                $params = [];
-                if($f_start) { $sql .= " AND ar.audit_date_real >= ?"; $params[] = $f_start; }
-                if($f_end) { $sql .= " AND ar.audit_date_real <= ?"; $params[] = $f_end; }
-                
-                if ($isAuditor) {
-                    $sql .= " AND p.id IN (SELECT f_planning_id FROM planning_auditor WHERE f_auditor_id = ?)";
-                    $params[] = $userId;
-                }
-
-                $stmt = $db->prepare($sql);
-                $stmt->execute($params);
-                $data = $stmt->fetchAll(PDO::FETCH_ASSOC);
-                
-                echo json_encode(['status' => 'success', 'data' => $data]);
-            } catch (Exception $e) {
-                echo json_encode(['status' => 'success', 'data' => []]);
+            $sql = "SELECT ar.*, c.c_name, p.audit_type 
+                    FROM audit_report ar
+                    JOIN planning p ON ar.f_planning_id = p.id
+                    JOIN company c ON p.f_company_id = c.id
+                    WHERE 1=1";
+            
+            $params = [];
+            if($f_start) { $sql .= " AND ar.audit_date_real >= ?"; $params[] = $f_start; }
+            if($f_end) { $sql .= " AND ar.audit_date_real <= ?"; $params[] = $f_end; }
+            
+            if ($isAuditor) {
+                $sql .= " AND p.id IN (SELECT f_planning_id FROM planning_auditor WHERE f_auditor_id = ?)";
+                $params[] = $userId;
             }
+
+            $stmt = $db->prepare($sql);
+            $stmt->execute($params);
+            $data = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            echo json_encode(['status' => 'success', 'data' => $data]);
             exit();
         }
 
     } catch (Exception $e) {
-        echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
+        // GÜVENLİK GÜNCELLEMESİ: Hatalar loglanır, kullanıcıya jenerik mesaj verilir.
+        error_log("Report API Error: " . $e->getMessage());
+        echo json_encode(['status' => 'error', 'message' => 'Sistemsel bir hata oluştu. Lütfen tekrar deneyin.']);
         exit();
     }
 }
@@ -292,7 +283,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .tab-content.active { display: block; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         
-        /* Grid Layout for Filters */
         .report-controls { background: #eef2f7; padding: 20px; border-radius: 6px; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; align-items: end; border: 1px solid #dce4ec; }
         .control-group { display: flex; flex-direction: column; width: 100%; }
         .control-group label { font-weight: 600; font-size: 0.85rem; margin-bottom: 6px; color: #555; }
@@ -343,7 +333,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <select id="company_filter" class="form-select">
                     <option value="">Tümü</option>
                     <?php foreach($companies as $c): ?>
-                        <option value="<?= $c['id'] ?>"><?= htmlspecialchars($c['c_name']) ?></option>
+                        <option value="<?= htmlspecialchars($c['id'], ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($c['c_name'], ENT_QUOTES, 'UTF-8') ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -353,7 +343,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <select id="cert_filter" class="form-select">
                     <option value="">Tümü</option>
                     <?php foreach($certs as $ct): ?>
-                        <option value="<?= $ct['id'] ?>"><?= htmlspecialchars($ct['name']) ?></option>
+                        <option value="<?= htmlspecialchars($ct['id'], ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($ct['name'], ENT_QUOTES, 'UTF-8') ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -364,7 +354,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <option value="">Tümü</option>
                     <option value="0">İlk Belgelendirme Sürecinde</option>
                     <?php foreach($statuses as $s): ?>
-                        <option value="<?= $s['id'] ?>"><?= htmlspecialchars($s['status']) ?></option>
+                        <option value="<?= htmlspecialchars($s['id'], ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($s['status'], ENT_QUOTES, 'UTF-8') ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -453,6 +443,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </div>
 
 <script>
+    // --- GÜVENLİK (XSS) GÜNCELLEMESİ: Merkezi Escape Fonksiyonu ---
+    function escapeHTML(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     let tableForecast;
     let tableHistory;
 
@@ -500,7 +501,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     function loadForecastReport() {
-        // Form verilerini topla
         const fd = new FormData();
         fd.append('action', 'forecast_report');
         fd.append('company_filter', document.getElementById('company_filter').value);
@@ -512,27 +512,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         fd.append('start_date', document.getElementById('start_date').value);
         fd.append('end_date', document.getElementById('end_date').value);
 
-        // Dinamik olarak mevcut dosyaya post at
         fetch(window.location.href, { method: 'POST', body: fd })
         .then(r => r.json())
         .then(res => {
-            if(res.status === 'error') { alert(res.message); return; }
+            if(res.status === 'error') { alert(escapeHTML(res.message)); return; }
             
             tableForecast.clear();
             if(res.status === 'success' && res.data.length > 0) {
                 res.data.forEach(row => {
-                    const statusName = row.cert_status_name || 'Bilinmiyor';
+                    // GÜVENLİK GÜNCELLEMESİ: Tüm JSON alanları HTML içine gömülmeden önce sanitize edildi
+                    const safeStatusName = escapeHTML(row.cert_status_name) || 'Bilinmiyor';
+                    const safeCertNo = escapeHTML(row.certno);
+                    const safeCertName = escapeHTML(row.cert_name);
+                    const safePeriod = escapeHTML(row.period);
+                    const safeCName = escapeHTML(row.c_name);
+                    const safeNextAudit = escapeHTML(row.next_audit_type);
+
                     const certInfo = `
-                        <div class="cert-no-main">${row.certno}</div>
-                        <div class="cert-name-sub">${row.cert_name}</div>
-                        <div class="cert-info-sub">Periyot: ${row.period} Yıl | Durum: <b>${statusName}</b></div>
+                        <div class="cert-no-main">${safeCertNo}</div>
+                        <div class="cert-name-sub">${safeCertName}</div>
+                        <div class="cert-info-sub">Periyot: ${safePeriod} Yıl | Durum: <b>${safeStatusName}</b></div>
                     `;
                     
                     tableForecast.row.add([
-                        row.c_name,
+                        safeCName,
                         certInfo,
-                        `<span style="font-weight:600; color:#333;">${row.next_audit_type}</span>`,
-                        row.status_html
+                        `<span style="font-weight:600; color:#333;">${safeNextAudit}</span>`,
+                        row.status_html // Backend'den gelen kontrollü/güvenli formatlanmış HTML
                     ]);
                 });
             }
@@ -542,38 +548,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     function loadAuditReports() {
-    const start = document.getElementById('ar_start').value;
-    const end = document.getElementById('ar_end').value;
+        const start = document.getElementById('ar_start').value;
+        const end = document.getElementById('ar_end').value;
 
-    const fd = new FormData();
-    fd.append('action', 'filter_audit_reports');
-    fd.append('start_date', start);
-    fd.append('end_date', end);
+        const fd = new FormData();
+        fd.append('action', 'filter_audit_reports');
+        fd.append('start_date', start);
+        fd.append('end_date', end);
 
-    fetch(window.location.href, { method: 'POST', body: fd })
-    .then(r => r.json())
-    .then(res => {
-        tableHistory.clear();
-        if(res.status === 'success' && res.data.length > 0) {
-            res.data.forEach(row => {
-                let typeDisplay = row.audit_type;
-                if(typeDisplay === 'ilk') typeDisplay = 'İlk Belgelendirme';
-                else if(typeDisplay === 'ara') typeDisplay = 'Ara Tetkik';
-                else if(typeDisplay === 'yenileme') typeDisplay = 'Yeniden Belgelendirme';
-                
-                tableHistory.row.add([
-                    row.report_no || '-',
-                    row.c_name || '-',
-                    typeDisplay || '-',
-                    row.audit_date_real || '-',
-                    row.decision || '-',
-                    '<button class="action-button" style="background:#17a2b8; border:none; padding:5px 10px; border-radius:4px; color:#fff;" onclick="alert(\'Rapor: '+row.report_no+'\')"><i class="fa fa-eye"></i></button>'
-                ]);
-            });
-        }
-        tableHistory.draw();
-    });
-}
+        fetch(window.location.href, { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(res => {
+            tableHistory.clear();
+            if(res.status === 'success' && res.data.length > 0) {
+                res.data.forEach(row => {
+                    let typeDisplay = row.audit_type;
+                    if(typeDisplay === 'ilk') typeDisplay = 'İlk Belgelendirme';
+                    else if(typeDisplay === 'ara') typeDisplay = 'Ara Tetkik';
+                    else if(typeDisplay === 'yenileme') typeDisplay = 'Yeniden Belgelendirme';
+                    
+                    // GÜVENLİK GÜNCELLEMESİ: Veriler sanitize edildi.
+                    const safeReportNo = escapeHTML(row.report_no);
+                    const safeCName = escapeHTML(row.c_name);
+                    const safeType = escapeHTML(typeDisplay);
+                    const safeDate = escapeHTML(row.audit_date_real);
+                    const safeDecision = escapeHTML(row.decision);
+
+                    // Breakout protection
+                    const actionBtn = `<button class="action-button" style="background:#17a2b8; border:none; padding:5px 10px; border-radius:4px; color:#fff;" data-report="${safeReportNo}" onclick="alert('Rapor: ' + this.getAttribute('data-report'))"><i class="fa fa-eye"></i></button>`;
+
+                    tableHistory.row.add([
+                        safeReportNo || '-',
+                        safeCName || '-',
+                        safeType || '-',
+                        safeDate || '-',
+                        safeDecision || '-',
+                        actionBtn
+                    ]);
+                });
+            }
+            tableHistory.draw();
+        })
+        .catch(err => console.error(err));
+    }
 </script>
 
 </body>

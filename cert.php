@@ -125,21 +125,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
     } catch (PDOException $e) {
-        echo json_encode(['status' => 'error', 'message' => 'Veritabanı hatası: ' . $e->getMessage()]);
+        // GÜVENLİK GÜNCELLEMESİ: Veritabanı detayı loglanır, kullanıcıya genel mesaj verilir.
+        error_log("Cert API Error: " . $e->getMessage());
+        echo json_encode(['status' => 'error', 'message' => 'İşlem sırasında bir sistem hatası oluştu.']);
         exit();
     }
 }
 
 // --- 3. İLK YÜKLEME VERİLERİ (GET) ---
 try {
-    // URL'den gelen filtre varsa al (Sayfa yenilendiğinde filtreyi korumak için)
     $f_period = intval($_GET['period'] ?? 0);
 
-    // Ana SQL
     $sql = "SELECT * FROM cert WHERE 1=1";
     $params = [];
     
-    // Eğer sayfaya link ile gelindiyse filtreyi uygula
     if ($f_period > 0) {
         $sql .= " AND period = ?";
         $params[] = $f_period;
@@ -151,7 +150,11 @@ try {
     $stmt->execute($params);
     $certs = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-} catch (PDOException $e) { $error = "Hata: " . $e->getMessage(); }
+} catch (PDOException $e) { 
+    // GÜVENLİK GÜNCELLEMESİ
+    error_log("Cert Page Load Error: " . $e->getMessage());
+    $error = "Veriler yüklenirken sistemsel bir hata oluştu."; 
+}
 ?>
 
 <!DOCTYPE html>
@@ -257,6 +260,12 @@ try {
         <button class="add-button" onclick="openModal('add')"><i class="fa fa-plus"></i> Yeni Belge Tanımla</button>
     </div>
 
+    <?php if (isset($error)): ?>
+        <div style="background:#f8d7da; color:#721c24; padding:15px; border-radius:4px; margin-bottom:20px;">
+            <?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?>
+        </div>
+    <?php endif; ?>
+
     <form id="filterForm" class="filter-section">
         <div class="filter-group">
             <label>Periyot</label>
@@ -302,15 +311,15 @@ try {
                 <?php if (!empty($certs)): ?>
                     <?php foreach ($certs as $cert): ?>
                         <tr id="row-<?php echo $cert['id']; ?>">
-                            <td><?php echo htmlspecialchars($cert['name']); ?></td>
-                            <td><?php echo htmlspecialchars($cert['standard'] ?? ''); ?></td>
-                            <td><?php echo htmlspecialchars($cert['period']); ?> Yıl</td>
-                            <td><?php echo htmlspecialchars($cert['surveillance_count']); ?></td>
-                            <td><?php echo htmlspecialchars($cert['surveillance_frequency']); ?> Ay</td>
+                            <td><?php echo htmlspecialchars($cert['name'], ENT_QUOTES, 'UTF-8'); ?></td>
+                            <td><?php echo htmlspecialchars($cert['standard'] ?? '', ENT_QUOTES, 'UTF-8'); ?></td>
+                            <td><?php echo htmlspecialchars($cert['period'], ENT_QUOTES, 'UTF-8'); ?> Yıl</td>
+                            <td><?php echo htmlspecialchars($cert['surveillance_count'], ENT_QUOTES, 'UTF-8'); ?></td>
+                            <td><?php echo htmlspecialchars($cert['surveillance_frequency'], ENT_QUOTES, 'UTF-8'); ?> Ay</td>
                             <td style="text-align: right;">
                                 <div class="action-buttons-wrapper">
-                                    <button class="action-button update" onclick="openModal('update', <?php echo $cert['id']; ?>)">Güncelle</button>
-                                    <button class="action-button delete" onclick="deleteCert(<?php echo $cert['id']; ?>)">Sil</button>
+                                    <button class="action-button update" onclick="openModal('update', <?php echo (int)$cert['id']; ?>)">Güncelle</button>
+                                    <button class="action-button delete" onclick="deleteCert(<?php echo (int)$cert['id']; ?>)">Sil</button>
                                 </div>
                             </td>
                         </tr>
@@ -384,21 +393,28 @@ try {
 </div>
 
 <script>
+    // --- GÜVENLİK (XSS) GÜNCELLEMESİ: Merkezi Escape Fonksiyonu ---
+    function escapeHTML(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     let dataTable;
 
     $(document).ready(function() {
-        // 1. Initial State Handling (Sayfa ilk yüklendiğinde)
-        // URL'de bir filtre varsa (örneğin bookmark'tan gelindiyse)
-        // PHP zaten tabloyu filtreli basıyor, ama Dropdown UI'ını güncellemeliyiz.
         const urlParams = new URLSearchParams(window.location.search);
         const period = urlParams.get('period');
         
         if (period) {
             document.getElementById('f_period').value = period;
-            document.getElementById('f_periodBtn').innerHTML = period + ' Yıl <span class=\"arrow-down\">&#9662;</span>';
+            document.getElementById('f_periodBtn').innerHTML = escapeHTML(period) + ' Yıl <span class=\"arrow-down\">&#9662;</span>';
         }
 
-        // DataTables Ayarları
         dataTable = $('#certTable').DataTable({
             "destroy": true, 
             "pageLength": 10, 
@@ -413,35 +429,27 @@ try {
         });
     });
 
-    // --- POPSTATE EVENT LISTENER (BACK BUTTON SUPPORT) ---
     window.addEventListener('popstate', function(event) {
-        // 1. URL'den parametreleri oku
         const urlParams = new URLSearchParams(window.location.search);
         const period = urlParams.get('period') || '';
 
-        // 2. UI'ı güncelle
         document.getElementById('f_period').value = period;
         const btn = document.getElementById('f_periodBtn');
-        if(period) btn.innerHTML = period + ' Yıl <span class="arrow-down">&#9662;</span>';
+        if(period) btn.innerHTML = escapeHTML(period) + ' Yıl <span class="arrow-down">&#9662;</span>';
         else btn.innerHTML = 'Tümü <span class="arrow-down">&#9662;</span>';
 
-        // 3. Tabloyu güncelle (False parametresi ile history'ye tekrar push yapma)
         applyFilters(false);
     });
 
-    // --- FİLTRELEME FONKSİYONU (AJAX) ---
     function applyFilters(pushToHistory = true) {
         const period = document.getElementById('f_period').value;
 
-        // URL Güncelleme
         const newUrl = new URL(window.location.href);
         if(period) newUrl.searchParams.set('period', period); else newUrl.searchParams.delete('period');
 
         if (pushToHistory) {
-            // Kullanıcı butona bastı: Geçmişe ekle
             window.history.pushState({path: newUrl.href}, '', newUrl);
         } else {
-            // Geri tuşu ile gelindi: Sadece URL'i güncelle (replaceState)
             window.history.replaceState(null, '', newUrl);
         }
 
@@ -456,43 +464,49 @@ try {
                 dataTable.clear();
                 
                 res.data.forEach(row => {
+                    // GÜVENLİK GÜNCELLEMESİ: Tüm veriler DataTables'a (DOM'a) basılırken sanitize edildi.
+                    const safeId = escapeHTML(row.id);
+                    const safeName = escapeHTML(row.name);
+                    const safeStandard = escapeHTML(row.standard);
+                    const safePeriod = escapeHTML(row.period);
+                    const safeCount = escapeHTML(row.surveillance_count);
+                    const safeFreq = escapeHTML(row.surveillance_frequency || 12);
+
                     const buttons = `
                         <div class="action-buttons-wrapper">
-                            <button class="action-button update" onclick="openModal('update', ${row.id})">Güncelle</button>
-                            <button class="action-button delete" onclick="deleteCert(${row.id})">Sil</button>
+                            <button class="action-button update" onclick="openModal('update', ${safeId})">Güncelle</button>
+                            <button class="action-button delete" onclick="deleteCert(${safeId})">Sil</button>
                         </div>
                     `;
                     
                     dataTable.row.add([
-                        row.name,
-                        row.standard || '', 
-                        row.period + ' Yıl',
-                        row.surveillance_count,
-                        (row.surveillance_frequency || 12) + ' Ay',
+                        safeName,
+                        safeStandard, 
+                        safePeriod + ' Yıl',
+                        safeCount,
+                        safeFreq + ' Ay',
                         buttons
                     ]);
                 });
                 
                 dataTable.draw();
+            } else {
+                alert('Hata: ' + escapeHTML(res.message));
             }
         })
         .catch(err => console.error('Filtre hatası:', err));
     }
 
     function resetFilters() {
-        // Formu temizle
         document.getElementById('f_period').value = '';
         document.getElementById('f_periodBtn').innerHTML = 'Tümü <span class="arrow-down">&#9662;</span>';
         
-        // URL'yi temizle ve geçmişe ekle
         const newUrl = window.location.href.split('?')[0];
         window.history.pushState({path: newUrl}, '', newUrl);
         
-        // Tabloyu sıfırla
         applyFilters(false);
     }
 
-    // --- MEVCUT FONKSİYONLAR ---
     function toggleDropdown(id) { document.getElementById(id).classList.toggle("show"); }
 
     window.onclick = function(event) {
@@ -640,11 +654,11 @@ try {
         .then(res => res.json())
         .then(data => {
             if (data.status === 'success') {
-                alert(data.message);
+                alert(escapeHTML(data.message));
                 closeModal();
                 applyFilters(false);
             } else {
-                alert('Hata: ' + data.message);
+                alert('Hata: ' + escapeHTML(data.message));
             }
         })
         .catch(err => { console.error(err); alert('Bir hata oluştu.'); });
@@ -659,10 +673,10 @@ try {
             .then(r => r.json())
             .then(data => {
                 if (data.status === 'success') {
-                    alert(data.message);
+                    alert(escapeHTML(data.message));
                     applyFilters(false);
                 } else {
-                    alert('Hata: ' + data.message);
+                    alert('Hata: ' + escapeHTML(data.message));
                 }
             })
             .catch(err => console.error(err));

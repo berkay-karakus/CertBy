@@ -74,7 +74,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit();
 
         } catch (Exception $e) {
-            echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
+            error_log("Filter Audits Error: " . $e->getMessage());
+            echo json_encode(['status' => 'error', 'message' => 'Veriler filtrelenirken sistemsel bir hata oluştu.']);
             exit();
         }
     }
@@ -131,28 +132,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode($events);
             exit();
         } catch (Exception $e) {
+            error_log("Calendar Events Error: " . $e->getMessage());
             echo json_encode([]); exit();
         }
     }
     
     // 3. E-POSTA ŞABLON VERİSİ
     if (isset($_POST['action']) && $_POST['action'] === 'get_template_data') {
-        $templateId = intval($_POST['id'] ?? 0);
-        $sql = "SELECT et.subject, et.body, GROUP_CONCAT(ea.file_name) AS attached_files, GROUP_CONCAT(ea.id) AS attached_ids FROM email_template et LEFT OUTER JOIN email_attachment ea ON et.id = ea.FK_email_template_id WHERE et.id = ? GROUP BY et.id, et.subject, et.body";
-        $stmt = $db->prepare($sql);
-        $stmt->execute([$templateId]);
-        $template = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($template) {
-            $files = $template['attached_files'] ? explode(',', $template['attached_files']) : [];
-            $ids = $template['attached_ids'] ? explode(',', $template['attached_ids']) : [];
-            $attachments = [];
-            for($i=0; $i<count($files); $i++){
-                $attachments[] = ['id' => $ids[$i], 'file_name' => $files[$i]];
+        try {
+            $templateId = intval($_POST['id'] ?? 0);
+            $sql = "SELECT et.subject, et.body, GROUP_CONCAT(ea.file_name) AS attached_files, GROUP_CONCAT(ea.id) AS attached_ids FROM email_template et LEFT OUTER JOIN email_attachment ea ON et.id = ea.FK_email_template_id WHERE et.id = ? GROUP BY et.id, et.subject, et.body";
+            $stmt = $db->prepare($sql);
+            $stmt->execute([$templateId]);
+            $template = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($template) {
+                $files = $template['attached_files'] ? explode(',', $template['attached_files']) : [];
+                $ids = $template['attached_ids'] ? explode(',', $template['attached_ids']) : [];
+                $attachments = [];
+                for($i=0; $i<count($files); $i++){
+                    $attachments[] = ['id' => $ids[$i], 'file_name' => $files[$i]];
+                }
+                echo json_encode(['success' => true, 'subject' => $template['subject'], 'body' => $template['body'], 'attachments' => $attachments]);
+            } else {
+                echo json_encode(['success' => false, 'message' => 'Şablon bulunamadı.']);
             }
-            echo json_encode(['success' => true, 'subject' => $template['subject'], 'body' => $template['body'], 'attachments' => $attachments]);
-        } else echo json_encode(['success' => false, 'message' => 'Şablon bulunamadı.']);
-        exit();
+            exit();
+        } catch (Exception $e) {
+            error_log("Template Data Error: " . $e->getMessage());
+            echo json_encode(['success' => false, 'message' => 'Şablon verisi çekilirken hata oluştu.']);
+            exit();
+        }
     }
 
     // YETKİ KONTROLÜ (CRUD)
@@ -206,18 +216,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                      $stmtCert->execute([$plan['audit_certtification_no']]);
                      $cert = $stmtCert->fetch(PDO::FETCH_ASSOC);
                      $plan['linked_cert_id'] = $cert ? $cert['id'] : 0;
-                }
-
-                // EĞER DENETİM GERÇEKLEŞTİYSE, RAPOR DETAYLARINI DA ÇEKELİM
-                if ($plan['audit_status'] === 'Gerçekleşti') {
-                    $stmtRep = $db->prepare("SELECT report_no, audit_date_real, decision FROM audit_report WHERE f_planning_id = ?");
-                    $stmtRep->execute([$id]);
-                    $repData = $stmtRep->fetch(PDO::FETCH_ASSOC);
-                    if ($repData) {
-                        $plan['report_no'] = $repData['report_no'];
-                        $plan['audit_date_real'] = $repData['audit_date_real'];
-                        $plan['report_decision'] = $repData['decision'];
-                    }
                 }
 
                 echo json_encode(['status' => 'success', 'data' => $plan]);
@@ -302,82 +300,70 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $stmtAudName = $db->prepare("SELECT name FROM user WHERE id = ?");
                     $stmtAudName->execute([$audId]);
                     $audName = $stmtAudName->fetchColumn();
-                    echo json_encode(['status' => 'error', 'message' => "ÇAKIŞMA HATASI: $audName isimli denetçi, seçilen tarih aralığında başka bir denetimde görevli!"]);
+                    echo json_encode(['status' => 'error', 'message' => "ÇAKIŞMA HATASI: " . htmlspecialchars($audName) . " isimli denetçi, seçilen tarih aralığında başka bir denetimde görevli!"]);
                     exit();
                 }
             }
 
-            $db->beginTransaction(); // Veritabanı tutarlılığı için Transaction başlatıyoruz
-
-            try {
-                if ($action === 'add') {
-                    $sql = "INSERT INTO planning (f_company_id, f_cert_id, audit_publish_date, audit_end_date, audit_status, audit_certtification_no, f_consult_company_id, audit_link, is_auto_generated, audit_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)";
-                    $stmt = $db->prepare($sql);
-                    $stmt->execute([$f_company_id, $f_cert_id, $start_date, $end_date, $status, $audit_certtification_no, $f_consult_company_id, $link, $audit_type]);
-                    $targetPlanId = $db->lastInsertId();
-                    $actionMessage = 'Denetim planı başarıyla oluşturuldu.';
+            if ($action === 'add') {
+                $sql = "INSERT INTO planning (f_company_id, f_cert_id, audit_publish_date, audit_end_date, audit_status, audit_certtification_no, f_consult_company_id, audit_link, is_auto_generated, audit_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)";
+                $stmt = $db->prepare($sql);
+                if ($stmt->execute([$f_company_id, $f_cert_id, $start_date, $end_date, $status, $audit_certtification_no, $f_consult_company_id, $link, $audit_type])) {
+                    $newId = $db->lastInsertId();
+                    
+                    $stmtPA = $db->prepare("INSERT INTO planning_auditor (f_planning_id, f_auditor_id) VALUES (?, ?)");
+                    foreach($auditorIds as $aId) { $stmtPA->execute([$newId, intval($aId)]); }
+                    
+                    if (!empty($participants) && is_array($participants)) {
+                        $stmtPart = $db->prepare("INSERT INTO participant (f_planning_id, name, email) VALUES (?, ?, ?)");
+                        foreach ($participants as $p) {
+                            if (!empty($p['name']) && !empty($p['email'])) { $stmtPart->execute([$newId, $p['name'], $p['email']]); }
+                        }
+                    }
                     
                     $stmtCN = $db->prepare("SELECT c_name FROM company WHERE id = ?");
                     $stmtCN->execute([$f_company_id]);
                     $logCompName = $stmtCN->fetchColumn();
                     $logStmt = $db->prepare("INSERT INTO general_log (user_id, company_id, cert_id, log_type, content) VALUES (?, ?, 0, 'Denetim Planlama', ?)");
                     $logStmt->execute([$_SESSION['user_id'], $f_company_id, "Yeni denetim planlandı: $logCompName ($start_date)"]);
-                }
-
-                if ($action === 'update') {
-                    $targetPlanId = intval($_POST['id'] ?? 0);
-                    $sql = "UPDATE planning SET f_company_id=?, f_cert_id=?, audit_publish_date=?, audit_end_date=?, audit_status=?, audit_certtification_no=?, f_consult_company_id=?, audit_link=?, audit_type=? WHERE id=?";
-                    $stmt = $db->prepare($sql);
-                    $stmt->execute([$f_company_id, $f_cert_id, $start_date, $end_date, $status, $audit_certtification_no, $f_consult_company_id, $link, $audit_type, $targetPlanId]);
                     
-                    $db->prepare("DELETE FROM planning_auditor WHERE f_planning_id = ?")->execute([$targetPlanId]);
-                    $db->prepare("DELETE FROM participant WHERE f_planning_id = ?")->execute([$targetPlanId]);
+                    echo json_encode(['status' => 'success', 'message' => 'Denetim planı başarıyla oluşturuldu.']);
+                } else { echo json_encode(['status' => 'error', 'message' => 'Kayıt hatası.']); }
+                exit();
+            }
+
+            if ($action === 'update') {
+                $id = intval($_POST['id'] ?? 0);
+                $sql = "UPDATE planning SET f_company_id=?, f_cert_id=?, audit_publish_date=?, audit_end_date=?, audit_status=?, audit_certtification_no=?, f_consult_company_id=?, audit_link=?, audit_type=? WHERE id=?";
+                $stmt = $db->prepare($sql);
+                if ($stmt->execute([$f_company_id, $f_cert_id, $start_date, $end_date, $status, $audit_certtification_no, $f_consult_company_id, $link, $audit_type, $id])) {
+                    
+                    $db->prepare("DELETE FROM planning_auditor WHERE f_planning_id = ?")->execute([$id]);
+                    $stmtPA = $db->prepare("INSERT INTO planning_auditor (f_planning_id, f_auditor_id) VALUES (?, ?)");
+                    foreach($auditorIds as $aId) { $stmtPA->execute([$id, intval($aId)]); }
+
+                    $db->prepare("DELETE FROM participant WHERE f_planning_id = ?")->execute([$id]);
+                    if (!empty($participants) && is_array($participants)) {
+                        $stmtPart = $db->prepare("INSERT INTO participant (f_planning_id, name, email) VALUES (?, ?, ?)");
+                        foreach ($participants as $p) {
+                            if (!empty($p['name']) && !empty($p['email'])) { $stmtPart->execute([$id, $p['name'], $p['email']]); }
+                        }
+                    }
 
                     $logStmt = $db->prepare("INSERT INTO general_log (user_id, company_id, cert_id, log_type, content) VALUES (?, ?, 0, 'Denetim Planlama', ?)");
-                    $logStmt->execute([$_SESSION['user_id'], $f_company_id, "Denetim güncellendi: $targetPlanId"]);
-                    $actionMessage = 'Denetim planı başarıyla güncellendi.';
-                }
-
-                // İlişkisel Kayıtlar (Denetçiler ve Katılımcılar)
-                $stmtPA = $db->prepare("INSERT INTO planning_auditor (f_planning_id, f_auditor_id) VALUES (?, ?)");
-                foreach($auditorIds as $aId) { $stmtPA->execute([$targetPlanId, intval($aId)]); }
-                
-                if (!empty($participants) && is_array($participants)) {
-                    $stmtPart = $db->prepare("INSERT INTO participant (f_planning_id, name, email) VALUES (?, ?, ?)");
-                    foreach ($participants as $p) {
-                        if (!empty($p['name']) && !empty($p['email'])) { $stmtPart->execute([$targetPlanId, $p['name'], $p['email']]); }
-                    }
-                }
-
-                // --- YENİ EKLENEN RAPORLAMA MANTIĞI ---
-                // Eğer durum 'Gerçekleşti' ise, audit_report tablosuna kayıt atılır/güncellenir
-                if ($status === 'Gerçekleşti') {
-                    $r_no = $_POST['report_no'] ?? '';
-                    $r_date = $_POST['audit_date_real'] ?? '';
-                    $r_dec = $_POST['report_decision'] ?? '';
-
-                    $checkRep = $db->prepare("SELECT id FROM audit_report WHERE f_planning_id = ?");
-                    $checkRep->execute([$targetPlanId]);
-                    if ($checkRep->rowCount() > 0) {
-                        $db->prepare("UPDATE audit_report SET report_no=?, audit_date_real=?, decision=? WHERE f_planning_id=?")
-                           ->execute([$r_no, $r_date, $r_dec, $targetPlanId]);
-                    } else {
-                        $db->prepare("INSERT INTO audit_report (f_planning_id, report_no, audit_date_real, decision) VALUES (?, ?, ?, ?)")
-                           ->execute([$targetPlanId, $r_no, $r_date, $r_dec]);
-                    }
-                }
-
-                $db->commit();
-                echo json_encode(['status' => 'success', 'message' => $actionMessage]);
-
-            } catch(Exception $e) {
-                $db->rollBack();
-                echo json_encode(['status' => 'error', 'message' => 'İşlem hatası: ' . $e->getMessage()]);
+                    $logStmt->execute([$_SESSION['user_id'], $f_company_id, "Denetim güncellendi: $id"]);
+                    echo json_encode(['status' => 'success', 'message' => 'Denetim planı başarıyla güncellendi.']);
+                } else { echo json_encode(['status' => 'error', 'message' => 'Güncelleme hatası.']); }
+                exit();
             }
-            exit();
         }
 
-    } catch (Exception $e) { echo json_encode(['status' => 'error', 'message' => $e->getMessage()]); exit(); }
+    } catch (Exception $e) {
+        // GÜVENLİK GÜNCELLEMESİ: Hatalar loglanır, kullanıcıya jenerik mesaj verilir.
+        error_log("Audit CRUD Error: " . $e->getMessage());
+        echo json_encode(['status' => 'error', 'message' => 'İşlem sırasında bir sistem hatası oluştu.']);
+        exit(); 
+    }
 }
 
 // --- SAYFA VERİLERİ (İLK YÜKLEME) ---
@@ -435,7 +421,10 @@ try {
     $stmt->execute($params);
     $plans = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-} catch (Exception $e) { $error = $e->getMessage(); }
+} catch (Exception $e) { 
+    error_log("Page Load Error: " . $e->getMessage());
+    $error = "Veriler yüklenirken sistemsel bir hata oluştu."; 
+}
 
 ?>
 <!DOCTYPE html>
@@ -450,7 +439,6 @@ try {
     <script src='https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js'></script>
 
     <style>
-        /* STİLLER AYNI */
         :root { --primary-color: #007bff; --secondary-color: #6c757d; --background-color: #f8f9fa; --card-background: #ffffff; --border-color: #e9ecef; --success-color: #28a745; --danger-color: #dc3545; --dropdown-hover: #f1f3f5; --dropdown-shadow: rgba(0,0,0,0.1); }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: var(--background-color); margin: 0; padding: 20px; color: #333; }
         .container { max-width: 98%; margin: 0 auto; background-color: var(--card-background); padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
@@ -538,23 +526,23 @@ try {
         <div class="filter-grid">
             <div class="filter-group">
                 <label>Başlangıç Tarihi</label>
-                <input type="date" name="start_date" id="f_start_date" class="filter-control" value="<?php echo $filterStartDate; ?>">
+                <input type="date" name="start_date" id="f_start_date" class="filter-control" value="<?php echo htmlspecialchars($filterStartDate, ENT_QUOTES, 'UTF-8'); ?>">
             </div>
             <div class="filter-group">
                 <label>Bitiş Tarihi</label>
-                <input type="date" name="end_date" id="f_end_date" class="filter-control" value="<?php echo $filterEndDate; ?>">
+                <input type="date" name="end_date" id="f_end_date" class="filter-control" value="<?php echo htmlspecialchars($filterEndDate, ENT_QUOTES, 'UTF-8'); ?>">
             </div>
             
             <div class="filter-group">
                 <label>Firma</label>
                 <div class="dropdown">
-                    <input type="hidden" name="company_id" id="f_company_id" value="<?php echo $filterCompanyId; ?>">
+                    <input type="hidden" name="company_id" id="f_company_id" value="<?php echo htmlspecialchars($filterCompanyId, ENT_QUOTES, 'UTF-8'); ?>">
                     <button type="button" id="f_companyBtn" onclick="toggleDropdown('f_companyDropdown')" class="dropbtn" style="width:100%">Tümü <span class="arrow-down">&#9662;</span></button>
                     <div id="f_companyDropdown" class="dropdown-content">
                         <input type="text" placeholder="Ara..." onkeyup="filterDropdown('f_companyDropdown')">
                         <a href="javascript:void(0)" onclick="selectFilterOption('f_company_id', '', 'Tümü', 'f_companyDropdown')">Tümü</a>
                         <?php foreach($companies as $c): ?>
-                            <a href="javascript:void(0)" onclick="selectFilterOption('f_company_id', '<?php echo $c['id']; ?>', '<?php echo htmlspecialchars($c['c_name']); ?>', 'f_companyDropdown')"><?php echo htmlspecialchars($c['c_name']); ?></a>
+                            <a href="javascript:void(0)" onclick="selectFilterOption('f_company_id', '<?php echo $c['id']; ?>', '<?php echo htmlspecialchars($c['c_name'], ENT_QUOTES, 'UTF-8'); ?>', 'f_companyDropdown')"><?php echo htmlspecialchars($c['c_name']); ?></a>
                         <?php endforeach; ?>
                     </div>
                 </div>
@@ -563,7 +551,7 @@ try {
             <div class="filter-group">
                 <label>Denetim Türü</label>
                 <div class="dropdown">
-                    <input type="hidden" name="audit_type" id="f_audit_type" value="<?php echo $filterAuditType; ?>">
+                    <input type="hidden" name="audit_type" id="f_audit_type" value="<?php echo htmlspecialchars($filterAuditType, ENT_QUOTES, 'UTF-8'); ?>">
                     <button type="button" id="f_auditTypeBtn" onclick="toggleDropdown('f_auditTypeDropdown')" class="dropbtn" style="width:100%">Tümü <span class="arrow-down">&#9662;</span></button>
                     <div id="f_auditTypeDropdown" class="dropdown-content">
                         <a href="javascript:void(0)" onclick="selectFilterOption('f_audit_type', '', 'Tümü', 'f_auditTypeDropdown')">Tümü</a>
@@ -578,13 +566,13 @@ try {
             <div class="filter-group">
                 <label>Denetçi</label>
                 <div class="dropdown">
-                    <input type="hidden" name="auditor_id" id="f_auditor_id" value="<?php echo $filterAuditorId; ?>">
+                    <input type="hidden" name="auditor_id" id="f_auditor_id" value="<?php echo htmlspecialchars($filterAuditorId, ENT_QUOTES, 'UTF-8'); ?>">
                     <button type="button" id="f_auditorBtn" onclick="toggleDropdown('f_auditorDropdown')" class="dropbtn" style="width:100%">Tümü <span class="arrow-down">&#9662;</span></button>
                     <div id="f_auditorDropdown" class="dropdown-content">
                         <input type="text" placeholder="Ara..." onkeyup="filterDropdown('f_auditorDropdown')">
                         <a href="javascript:void(0)" onclick="selectFilterOption('f_auditor_id', '', 'Tümü', 'f_auditorDropdown')">Tümü</a>
                         <?php foreach($auditors as $aud): ?>
-                            <a href="javascript:void(0)" onclick="selectFilterOption('f_auditor_id', '<?php echo $aud['id']; ?>', '<?php echo htmlspecialchars($aud['name']); ?>', 'f_auditorDropdown')"><?php echo htmlspecialchars($aud['name']); ?></a>
+                            <a href="javascript:void(0)" onclick="selectFilterOption('f_auditor_id', '<?php echo $aud['id']; ?>', '<?php echo htmlspecialchars($aud['name'], ENT_QUOTES, 'UTF-8'); ?>', 'f_auditorDropdown')"><?php echo htmlspecialchars($aud['name']); ?></a>
                         <?php endforeach; ?>
                     </div>
                 </div>
@@ -594,7 +582,7 @@ try {
             <div class="filter-group">
                 <label>Durum</label>
                 <div class="dropdown">
-                    <input type="hidden" name="audit_status" id="f_audit_status" value="<?php echo $filterStatus; ?>">
+                    <input type="hidden" name="audit_status" id="f_audit_status" value="<?php echo htmlspecialchars($filterStatus, ENT_QUOTES, 'UTF-8'); ?>">
                     <button type="button" id="f_auditStatusBtn" onclick="toggleDropdown('f_auditStatusDropdown')" class="dropbtn" style="width:100%">Tümü <span class="arrow-down">&#9662;</span></button>
                     <div id="f_auditStatusDropdown" class="dropdown-content">
                         <a href="javascript:void(0)" onclick="selectFilterOption('f_audit_status', '', 'Tümü', 'f_auditStatusDropdown')">Tümü</a>
@@ -645,7 +633,7 @@ try {
                                     if($t == 'ilk') echo 'İlk Belgelendirme';
                                     elseif($t == 'ara') echo 'Ara Tetkik';
                                     elseif($t == 'yenileme') echo 'Yeniden Belgelendirme';
-                                    else echo $t;
+                                    else echo htmlspecialchars($t);
                                 ?>
                             </td>
                             <td><?php echo htmlspecialchars($plan['cert_type_name'] ?? ''); ?></td>
@@ -688,12 +676,12 @@ try {
                             
                             <td style="text-align: right;">
                                 <div class="action-buttons-wrapper">
-                                    <button class="action-button email-button" onclick="openEmailModal('<?php echo $plan['id']; ?>', '<?php echo $plan['audit_type']; ?>')">
+                                    <button class="action-button email-button" onclick="openEmailModal('<?php echo htmlspecialchars($plan['id'], ENT_QUOTES, 'UTF-8'); ?>', '<?php echo htmlspecialchars($plan['audit_type'], ENT_QUOTES, 'UTF-8'); ?>')">
                                         <i class="fa fa-envelope"></i>
                                     </button>
                                     <?php if ($canEdit): ?>
-                                        <button class="action-button update" onclick="openModal('update', <?php echo $plan['id']; ?>)">Güncelle</button>
-                                        <button class="action-button delete" onclick="deletePlan(<?php echo $plan['id']; ?>)">Sil</button>
+                                        <button class="action-button update" onclick="openModal('update', '<?php echo htmlspecialchars($plan['id'], ENT_QUOTES, 'UTF-8'); ?>')">Güncelle</button>
+                                        <button class="action-button delete" onclick="deletePlan('<?php echo htmlspecialchars($plan['id'], ENT_QUOTES, 'UTF-8'); ?>')">Sil</button>
                                     <?php endif; ?>
                                 </div>
                             </td>
@@ -728,7 +716,7 @@ try {
                         <div id="companyDropdown" class="dropdown-content">
                             <input type="text" placeholder="Ara..." class="search-input-dropdown" onkeyup="filterDropdown('companyDropdown')">
                             <?php foreach ($companies as $c): ?>
-                                <a href="javascript:void(0)" onclick="selectOption('company_id', '<?php echo $c['id']; ?>', '<?php echo htmlspecialchars($c['c_name']); ?>', 'companyDropdown'); loadCompanyCerts('<?php echo $c['id']; ?>')" data-id="<?php echo $c['id']; ?>"><?php echo htmlspecialchars($c['c_name']); ?></a>
+                                <a href="javascript:void(0)" onclick="selectOption('company_id', '<?php echo $c['id']; ?>', '<?php echo htmlspecialchars($c['c_name'], ENT_QUOTES, 'UTF-8'); ?>', 'companyDropdown'); loadCompanyCerts('<?php echo $c['id']; ?>')" data-id="<?php echo $c['id']; ?>"><?php echo htmlspecialchars($c['c_name']); ?></a>
                             <?php endforeach; ?>
                         </div>
                     </div>
@@ -766,7 +754,7 @@ try {
                         <div id="certTypeDropdown" class="dropdown-content">
                              <input type="text" placeholder="Ara..." class="search-input-dropdown" onkeyup="filterDropdown('certTypeDropdown')">
                             <?php foreach ($certTypes as $ct): ?>
-                                <a href="javascript:void(0)" onclick="selectOption('cert_type_id', '<?php echo $ct['id']; ?>', '<?php echo htmlspecialchars($ct['name']); ?>', 'certTypeDropdown')" data-id="<?php echo $ct['id']; ?>"><?php echo htmlspecialchars($ct['name']); ?></a>
+                                <a href="javascript:void(0)" onclick="selectOption('cert_type_id', '<?php echo $ct['id']; ?>', '<?php echo htmlspecialchars($ct['name'], ENT_QUOTES, 'UTF-8'); ?>', 'certTypeDropdown')" data-id="<?php echo $ct['id']; ?>"><?php echo htmlspecialchars($ct['name']); ?></a>
                             <?php endforeach; ?>
                         </div>
                     </div>
@@ -788,7 +776,7 @@ try {
                         <div id="auditorDropdown" class="dropdown-content">
                              <input type="text" placeholder="Ara..." class="search-input-dropdown" onkeyup="filterDropdown('auditorDropdown')">
                              <?php foreach ($auditors as $aud): ?>
-                                <a href="javascript:void(0)" onclick="addAuditor('<?php echo $aud['id']; ?>', '<?php echo htmlspecialchars($aud['name']); ?>')" data-id="<?php echo $aud['id']; ?>"><?php echo htmlspecialchars($aud['name']); ?></a>
+                                <a href="javascript:void(0)" onclick="addAuditor('<?php echo $aud['id']; ?>', '<?php echo htmlspecialchars($aud['name'], ENT_QUOTES, 'UTF-8'); ?>')" data-id="<?php echo $aud['id']; ?>"><?php echo htmlspecialchars($aud['name']); ?></a>
                             <?php endforeach; ?>
                         </div>
                     </div>
@@ -822,7 +810,7 @@ try {
                                 <i class="fa fa-times-circle"></i> Seçimi Temizle
                             </a>
                              <?php foreach ($consultants as $cons): ?>
-                                <a href="javascript:void(0)" onclick="selectOption('consult_id', '<?php echo $cons['id']; ?>', '<?php echo htmlspecialchars($cons['c_name']); ?>', 'consultDropdown')" data-id="<?php echo $cons['id']; ?>"><?php echo htmlspecialchars($cons['c_name']); ?></a>
+                                <a href="javascript:void(0)" onclick="selectOption('consult_id', '<?php echo $cons['id']; ?>', '<?php echo htmlspecialchars($cons['c_name'], ENT_QUOTES, 'UTF-8'); ?>', 'consultDropdown')" data-id="<?php echo $cons['id']; ?>"><?php echo htmlspecialchars($cons['c_name']); ?></a>
                             <?php endforeach; ?>
                         </div>
                     </div>
@@ -831,30 +819,6 @@ try {
                  <div class="form-field full-width">
                     <label class="required">Denetim Linki (Online/Konum)</label>
                     <input type="text" id="audit_link" name="audit_link" class="form-control" required>
-                </div>
-
-                <div id="reportFieldsRow" class="form-grid-modal full-width" style="display:none; background:#e8f5e9; padding:15px; border-radius:4px; border:1px solid #c3e6cb; margin-top:15px;">
-                    <h3 style="grid-column: 1 / -1; margin-top:0; color:#155724; font-size:1.1rem; border-bottom:1px solid #c3e6cb; padding-bottom:5px;">Rapor Detayları</h3>
-                    <div class="form-field">
-                        <label class="required">Rapor Numarası</label>
-                        <input type="text" id="report_no" name="report_no" class="form-control" placeholder="Örn: REP-2026-001">
-                    </div>
-                    <div class="form-field">
-                        <label class="required">Gerçekleşen Denetim Tarihi</label>
-                        <input type="date" id="audit_date_real" name="audit_date_real" class="form-control">
-                    </div>
-                    <div class="form-field full-width">
-                        <label class="required">Denetim Kararı</label>
-                        <select id="report_decision" name="report_decision" class="form-control">
-                            <option value="">Seçiniz...</option>
-                            <option value="Belgelendirme Onaylandı">Belgelendirme Onaylandı</option>
-                            <option value="Devam Kararı">Mevcut Belgenin Devamı</option>
-                            <option value="Majör Uygunsuzluk">Majör Uygunsuzluk (Takip Gerekli)</option>
-                            <option value="Minör Uygunsuzluk">Minör Uygunsuzluk</option>
-                            <option value="Belge Askıya Alındı">Belge Askıya Alındı</option>
-                            <option value="Belge İptal">Belge İptal Edildi</option>
-                        </select>
-                    </div>
                 </div>
 
                 <div class="form-field full-width" style="border-top:1px solid #eee; padding-top:10px;">
@@ -892,7 +856,7 @@ try {
                     <div id="templateDropdown" class="dropdown-content">
                         <input type="text" placeholder="Ara..." class="search-input-dropdown" onkeyup="filterDropdown('templateDropdown')">
                         <?php foreach ($emailTemplates as $id => $subj): ?>
-                            <a href="javascript:void(0)" onclick="selectOption('templateId', '<?php echo $id; ?>', '<?php echo htmlspecialchars($subj); ?>', 'templateDropdown'); fetchTemplateData('<?php echo $id; ?>')" data-id="<?php echo $id; ?>"><?php echo htmlspecialchars($subj); ?></a>
+                            <a href="javascript:void(0)" onclick="selectOption('templateId', '<?php echo $id; ?>', '<?php echo htmlspecialchars($subj, ENT_QUOTES, 'UTF-8'); ?>', 'templateDropdown'); fetchTemplateData('<?php echo $id; ?>')" data-id="<?php echo $id; ?>"><?php echo htmlspecialchars($subj); ?></a>
                         <?php endforeach; ?>
                     </div>
                 </div>
@@ -928,6 +892,17 @@ try {
 </div>
 
 <script>
+    // --- GÜVENLİK (XSS) GÜNCELLEMESİ: Merkezi Escape Fonksiyonu ---
+    function escapeHTML(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     const emailTemplates = <?php echo json_encode($emailTemplates); ?>;
     let removedAttachments = []; 
     let selectedNewFiles = [];
@@ -1051,47 +1026,51 @@ try {
                 res.data.forEach(row => {
                     let st = row.audit_status;
                     let color = '#6c757d';
-                    if (st == 'Gerçekleşti') color = 'green';
-                    else if (st == 'Planlanacak') color = 'purple';
-                    else if (st == 'İptal') color = 'red';
-                    else if (st == 'Planlandı') color = 'orange';
-                    const statusHtml = `<span style='color:${color}; font-weight:bold;'>${st}</span>`;
+                    if (st === 'Gerçekleşti') color = 'green';
+                    else if (st === 'Planlanacak') color = 'purple';
+                    else if (st === 'İptal') color = 'red';
+                    else if (st === 'Planlandı') color = 'orange';
+                    const statusHtml = `<span style='color:${color}; font-weight:bold;'>${escapeHTML(st)}</span>`;
 
                     let remainingHtml = '-';
                     if(st !== 'Gerçekleşti' && st !== 'İptal') {
                         const days = parseInt(row.days_remaining);
                         if(days < 0) remainingHtml = "<span style='color:red; font-weight:bold;'>Süresi Geçti!</span>";
-                        else if(days < 30) remainingHtml = `<span style='color:#d35400; font-weight:bold;'>${days} Gün Kaldı</span>`;
-                        else remainingHtml = `<span style='color:green;'>${days} Gün Kaldı</span>`;
+                        else if(days < 30) remainingHtml = `<span style='color:#d35400; font-weight:bold;'>${escapeHTML(days)} Gün Kaldı</span>`;
+                        else remainingHtml = `<span style='color:green;'>${escapeHTML(days)} Gün Kaldı</span>`;
                     }
 
-                    let auditorDisplay = row.auditor_name ? row.auditor_name : '<span style="color:red; font-style:italic;">Atanmadı</span>';
+                    let auditorDisplay = row.auditor_name ? escapeHTML(row.auditor_name) : '<span style="color:red; font-style:italic;">Atanmadı</span>';
                     
                     let typeDisplay = row.audit_type;
-                    if(typeDisplay == 'ilk') typeDisplay = 'İlk Belgelendirme';
-                    else if(typeDisplay == 'ara') typeDisplay = 'Ara Tetkik';
-                    else if(typeDisplay == 'yenileme') typeDisplay = 'Yeniden Belgelendirme';
+                    if(typeDisplay === 'ilk') typeDisplay = 'İlk Belgelendirme';
+                    else if(typeDisplay === 'ara') typeDisplay = 'Ara Tetkik';
+                    else if(typeDisplay === 'yenileme') typeDisplay = 'Yeniden Belgelendirme';
 
+                    // GÜVENLİK GÜNCELLEMESİ: onClick ve buton içeriklerine gelen veriler filtrelendi
+                    const safeId = escapeHTML(row.id);
+                    const safeAuditType = escapeHTML(row.audit_type);
+                    
                     const actions = `
                         <div class="action-buttons-wrapper">
-                            <button class="action-button email-button" onclick="openEmailModal('${row.id}', '${row.audit_type}')"><i class="fa fa-envelope"></i></button>
+                            <button class="action-button email-button" onclick="openEmailModal('${safeId}', '${safeAuditType}')"><i class="fa fa-envelope"></i></button>
                             <?php if ($canEdit): ?>
-                                <button class="action-button update" onclick="openModal('update', '${row.id}')">Güncelle</button>
-                                <button class="action-button delete" onclick="deletePlan('${row.id}')">Sil</button>
+                                <button class="action-button update" onclick="openModal('update', '${safeId}')">Güncelle</button>
+                                <button class="action-button delete" onclick="deletePlan('${safeId}')">Sil</button>
                             <?php endif; ?>
                         </div>
                     `;
 
                     dataTable.row.add([
-                        row.company_name || '',
-                        typeDisplay,
-                        row.cert_type_name || '',
-                        row.audit_publish_date,
-                        row.audit_end_date,
+                        escapeHTML(row.company_name) || '',
+                        escapeHTML(typeDisplay),
+                        escapeHTML(row.cert_type_name) || '',
+                        escapeHTML(row.audit_publish_date),
+                        escapeHTML(row.audit_end_date),
                         auditorDisplay,
                         statusHtml,
                         remainingHtml,
-                        row.audit_certtification_no || '-',
+                        escapeHTML(row.audit_certtification_no) || '-',
                         actions
                     ]);
                 });
@@ -1101,7 +1080,7 @@ try {
                     initCalendar();
                 }
             } else {
-                alert(res.message || 'Bir hata oluştu.');
+                alert(escapeHTML(res.message) || 'Bir hata oluştu.');
             }
         })
         .catch(err => console.error(err));
@@ -1173,7 +1152,7 @@ try {
             },
             eventClick: function(info) {
                 <?php if ($canEdit): ?> openModal('update', info.event.id);
-                <?php else: ?> alert('Bu planın detayı: ' + info.event.title); <?php endif; ?>
+                <?php else: ?> alert('Bu planın detayı: ' + escapeHTML(info.event.title)); <?php endif; ?>
             }
         });
         calendar.render();
@@ -1200,29 +1179,11 @@ try {
         }
     }
 
-    // --- YENİ EKLENEN RAPOR ALANLARINI GÖSTERME/GİZLEME MANTIĞI ---
-    function toggleReportFields() {
-        const status = document.getElementById('audit_status').value;
-        const reportDiv = document.getElementById('reportFieldsRow');
-        if (status === 'Gerçekleşti') {
-            reportDiv.style.display = 'grid';
-            document.getElementById('report_no').required = true;
-            document.getElementById('audit_date_real').required = true;
-            document.getElementById('report_decision').required = true;
-        } else {
-            reportDiv.style.display = 'none';
-            document.getElementById('report_no').required = false;
-            document.getElementById('audit_date_real').required = false;
-            document.getElementById('report_decision').required = false;
-        }
-    }
-
     function selectOption(inputId, value, text, dropdownId) {
         document.getElementById(inputId).value = value;
         const btn = document.getElementById(dropdownId).closest('.dropdown').querySelector('.dropbtn');
         btn.innerHTML = text + ' <span class="arrow-down">&#9662;</span>';
         if(inputId === 'company_id') loadCompanyCerts(value);
-        if(inputId === 'audit_status') toggleReportFields(); // Durum değiştiğinde Rapor detaylarını kontrol et
     }
 
     function addAuditor(id, name) {
@@ -1245,7 +1206,8 @@ try {
             ids.push(a.id);
             const span = document.createElement('span');
             span.className = 'selected-auditor';
-            span.innerHTML = `${a.name} <span class="remove-auditor" onclick="removeAuditor('${a.id}')">&times;</span>`;
+            // GÜVENLİK GÜNCELLEMESİ: escapeHTML eklendi
+            span.innerHTML = `${escapeHTML(a.name)} <span class="remove-auditor" onclick="removeAuditor('${escapeHTML(a.id)}')">&times;</span>`;
             box.appendChild(span);
         });
         document.getElementById('auditorsInput').value = ids.join(',');
@@ -1285,7 +1247,9 @@ try {
                     a.textContent = `${c.certno} - ${c.cert_name}`;
                     a.onclick = function(e) {
                          e.preventDefault();
-                         selectOption('linked_cert_id', c.id, `${c.certno} - ${c.cert_name}`, 'linkedCertDropdown');
+                         // GÜVENLİK GÜNCELLEMESİ: HTML içerisine direkt enjekte olmaması için escape edildi
+                         const safeText = escapeHTML(c.certno) + ' - ' + escapeHTML(c.cert_name);
+                         selectOption('linked_cert_id', c.id, safeText, 'linkedCertDropdown');
                     };
                     dropdown.appendChild(a);
                 });
@@ -1303,9 +1267,10 @@ try {
     function addParticipantRow(name='', email='') {
         const div = document.createElement('div');
         div.className = 'participant-row';
+        // GÜVENLİK GÜNCELLEMESİ: input attributelerine değişken basılırken escapeHTML kullanıldı.
         div.innerHTML = `
-            <input type="text" placeholder="Ad Soyad" class="form-control" value="${name}" style="flex:1">
-            <input type="email" placeholder="E-posta" class="form-control" value="${email}" style="flex:1">
+            <input type="text" placeholder="Ad Soyad" class="form-control" value="${escapeHTML(name)}" style="flex:1">
+            <input type="email" placeholder="E-posta" class="form-control" value="${escapeHTML(email)}" style="flex:1">
             <span class="remove-part" onclick="this.parentElement.remove()">&times;</span>
         `;
         document.getElementById('participantList').appendChild(div);
@@ -1325,12 +1290,6 @@ try {
             else if(btn.id === 'auditTypeBtn') btn.innerHTML = 'İlk Belgelendirme <span class="arrow-down">&#9662;</span>';
             else if(!btn.id.includes('auditor')) btn.innerHTML = 'Seçiniz... <span class="arrow-down">&#9662;</span>';
         });
-
-        // Rapor alanlarını sıfırla ve gizle
-        document.getElementById('reportFieldsRow').style.display = 'none';
-        document.getElementById('report_no').value = '';
-        document.getElementById('audit_date_real').value = '';
-        document.getElementById('report_decision').value = '';
         
         selectedAuditors = [];
         renderAuditors();
@@ -1362,18 +1321,10 @@ try {
                         
                         const typeMap = {'ilk': 'İlk Belgelendirme', 'ara': 'Ara Tetkik (Gözetim)', 'yenileme': 'Yeniden Belgelendirme'};
                         const typeName = typeMap[d.audit_type] || d.audit_type;
-                        setDropdownByValue('audit_type', d.audit_type, 'auditTypeDropdown', typeName);
+                        setDropdownByValue('audit_type', d.audit_type, 'auditTypeDropdown', escapeHTML(typeName));
                         toggleCertSelection();
 
                         setDropdownByValue('audit_status', d.audit_status, 'statusDropdown');
-                        toggleReportFields(); // Eğer Gerçekleşti olarak geliyorsa Rapor alanlarını açar
-                        
-                        // Rapor detaylarını yükle
-                        if(d.audit_status === 'Gerçekleşti') {
-                            document.getElementById('report_no').value = d.report_no || '';
-                            document.getElementById('audit_date_real').value = d.audit_date_real || '';
-                            document.getElementById('report_decision').value = d.report_decision || '';
-                        }
                         
                         if(d.company_id) {
                             setDropdownByValue('company_id', d.company_id, 'companyDropdown');
@@ -1438,8 +1389,8 @@ try {
         fetch('audit.php', { method: 'POST', body: fd })
         .then(r => r.json())
         .then(data => {
-            if (data.status === 'success') { alert(data.message); location.reload(); }
-            else { alert('Hata: ' + data.message); }
+            if (data.status === 'success') { alert(escapeHTML(data.message)); location.reload(); }
+            else { alert('Hata: ' + escapeHTML(data.message)); }
         }).catch(err => { console.error(err); alert('Bir hata oluştu.'); });
     }
 
@@ -1451,13 +1402,12 @@ try {
             fetch('audit.php', { method: 'POST', body: fd })
             .then(r => r.json())
             .then(data => {
-                if (data.status === 'success') { alert(data.message); location.reload(); }
-                else { alert(data.message); }
+                if (data.status === 'success') { alert(escapeHTML(data.message)); location.reload(); }
+                else { alert(escapeHTML(data.message)); }
             });
         }
     }
     
-    // --- E-POSTA İŞLEMLERİ ---
     function openEmailModal(planId, auditType) {
         const modal = document.getElementById('emailModal');
         const form = document.getElementById('emailForm');
@@ -1476,7 +1426,7 @@ try {
         if(templateIdToSelect) {
              const link = document.querySelector(`#templateDropdown a[data-id='${templateIdToSelect}']`);
              if(link) {
-                 selectOption('templateId', templateIdToSelect, link.textContent, 'templateDropdown');
+                 selectOption('templateId', templateIdToSelect, escapeHTML(link.textContent), 'templateDropdown');
                  fetchTemplateData(templateIdToSelect);
              }
         }
@@ -1522,12 +1472,13 @@ try {
                     res.attachments.forEach(f => {
                         const li = document.createElement('li');
                         li.className = 'attachment-item';
-                        li.id = 'att-tmpl-' + f.id;
-                        li.innerHTML = `<span class="attachment-name"><i class="fa fa-file-alt" style="color:#6c757d; margin-right: 8px;"></i> ${f.file_name}</span><span class="remove-attachment" onclick="removeTemplateAttachment(${f.id})"><i class="fa fa-times"></i></span>`;
+                        li.id = 'att-tmpl-' + escapeHTML(f.id);
+                        // GÜVENLİK GÜNCELLEMESİ: f.file_name escape edildi
+                        li.innerHTML = `<span class="attachment-name"><i class="fa fa-file-alt" style="color:#6c757d; margin-right: 8px;"></i> ${escapeHTML(f.file_name)}</span><span class="remove-attachment" onclick="removeTemplateAttachment('${escapeHTML(f.id)}')"><i class="fa fa-times"></i></span>`;
                         ul.appendChild(li);
                     });
                 }
-            } else alert(res.message);
+            } else alert(escapeHTML(res.message));
         });
     }
 
@@ -1549,7 +1500,8 @@ try {
         selectedNewFiles.forEach((file, index) => {
             const li = document.createElement('li');
             li.className = 'attachment-item';
-            li.innerHTML = `<span class="attachment-name"><i class="fa fa-file-upload" style="color:#28a745; margin-right: 8px;"></i> ${file.name} <span class="new-file-badge">YENİ</span></span><span class="remove-attachment" onclick="removeNewFile(${index})"><i class="fa fa-times"></i></span>`;
+            // GÜVENLİK GÜNCELLEMESİ: file.name escape edildi
+            li.innerHTML = `<span class="attachment-name"><i class="fa fa-file-upload" style="color:#28a745; margin-right: 8px;"></i> ${escapeHTML(file.name)} <span class="new-file-badge">YENİ</span></span><span class="remove-attachment" onclick="removeNewFile(${index})"><i class="fa fa-times"></i></span>`;
             list.appendChild(li);
         });
     }
@@ -1579,17 +1531,17 @@ try {
             btn.disabled = false;
             btn.innerText = originalText;
             if(res.success) {
-                alert(res.message);
+                alert(escapeHTML(res.message));
                 closeEmailModal();
             } else {
-                alert('Hata: ' + res.message);
+                alert('Hata: ' + escapeHTML(res.message));
             }
         })
         .catch(err => { 
             btn.disabled = false;
             btn.innerText = originalText;
             console.error(err); 
-            alert('Bir hata oluştu: ' + err.message); 
+            alert('Bir hata oluştu: ' + escapeHTML(err.message)); 
         });
     }
 

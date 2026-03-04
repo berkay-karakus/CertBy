@@ -25,11 +25,10 @@ $canManage = ($userRole === 'operator' || $userRole === 'user');
 //  Dökümandaki "Ara tetkik tarihi geçmiş ve planlanmamışsa PASİF yap" kuralı
 // ==========================================================================
 function updateCertificationStatuses($db) {
-    // 1. Sadece 'Aktif' (ID: 1) olan sertifikaları çek
     $sql = "SELECT c.id, c.certno, c.publish_date, c.end_date, ct.surveillance_frequency, ct.period 
             FROM certification c
             JOIN cert ct ON c.f_cert_id = ct.id
-            WHERE c.status = 1"; // Sadece Aktifler
+            WHERE c.status = 1"; 
     
     $stmt = $db->prepare($sql);
     $stmt->execute();
@@ -39,37 +38,28 @@ function updateCertificationStatuses($db) {
 
     foreach ($certs as $cert) {
         $pubDate = new DateTime($cert['publish_date']);
-        $freq = intval($cert['surveillance_frequency']); // Örn: 12 Ay
+        $freq = intval($cert['surveillance_frequency']); 
         
-        // Ara Tetkik Tarihlerini Hesapla (1. ve 2. Gözetim)
         $surv1 = (clone $pubDate)->modify("+$freq months");
         $surv2 = (clone $pubDate)->modify("+" . ($freq * 2) . " months");
         
         $checkDate = null;
 
-        // Şu anki tarih hangi aralıkta? Hangi tetkik kaçmış olabilir?
         if ($today > $surv1 && $today < $surv2) {
-            // 1. Ara tetkik tarihi geçmiş, 2. henüz gelmemiş
             $checkDate = $surv1;
         } elseif ($today > $surv2) {
-            // 2. Ara tetkik tarihi de geçmiş
             $checkDate = $surv2;
         }
 
-        // Eğer kritik bir tarih geçilmişse PLAN KONTROLÜ yap
         if ($checkDate) {
-            // Planning tablosuna bak: Bu sertifika no ile İPTAL OLMAYAN bir plan var mı?
-            // Not: Tarih toleransı koymuyoruz, sadece plan var mı diye bakıyoruz.
             $stmtPlan = $db->prepare("SELECT count(*) FROM planning WHERE audit_certtification_no = ? AND audit_status != 'İptal'");
             $stmtPlan->execute([$cert['certno']]);
             $hasPlan = $stmtPlan->fetchColumn();
 
             if ($hasPlan == 0) {
-                // TARİH GEÇMİŞ VE PLAN YOK -> PASİF (ID: 2) YAP
                 $updateStmt = $db->prepare("UPDATE certification SET status = 2 WHERE id = ?");
                 $updateStmt->execute([$cert['id']]);
                 
-                // Logla
                 $logStmt = $db->prepare("INSERT INTO general_log (user_id, company_id, cert_id, log_type, content) VALUES (?, 0, ?, 'Sistem Otomasyonu', ?)");
                 $logStmt->execute([$_SESSION['user_id'], $cert['id'], "Sertifika otomatik olarak PASİF'e çekildi (Ara tetkik zamanı geçti ve plan yok)."]);
             }
@@ -77,7 +67,6 @@ function updateCertificationStatuses($db) {
     }
 }
 
-// Sayfa her yüklendiğinde veya API çağrıldığında statüleri tazele
 updateCertificationStatuses($db);
 
 // ==========================================================================
@@ -86,7 +75,6 @@ updateCertificationStatuses($db);
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Content-Type: application/json');
 
-    // Yetkisiz işlem kontrolü
     if (!$canManage && isset($_POST['action']) && in_array($_POST['action'], ['add', 'update', 'delete'])) {
         echo json_encode(['status' => 'error', 'message' => 'Bu işlem için yetkiniz yok.']);
         exit();
@@ -133,7 +121,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($action === 'get_certification') {
             $id = intval($_POST['id'] ?? 0);
             
-            // Cert tablosundan period bilgisini de çekiyoruz (Join ile)
             $sql = "SELECT c.*, ct.period as cert_period 
                     FROM certification c 
                     LEFT JOIN cert ct ON c.f_cert_id = ct.id 
@@ -182,7 +169,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit();
             }
 
-            // EKLEME
             if ($action === 'add') {
                 $stmtCheck = $db->prepare("SELECT count(*) FROM certification WHERE certno = ?");
                 $stmtCheck->execute([$certno]);
@@ -205,7 +191,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit();
             }
 
-            // GÜNCELLEME
             if ($action === 'update') {
                 $id = intval($_POST['id'] ?? 0);
                 $stmtCheck = $db->prepare("SELECT count(*) FROM certification WHERE certno = ? AND id != ?");
@@ -227,7 +212,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
-    } catch (PDOException $e) { echo json_encode(['status' => 'error', 'message' => $e->getMessage()]); exit(); }
+    } catch (PDOException $e) { 
+        // GÜVENLİK GÜNCELLEMESİ: Veritabanı detayı loglanır, kullanıcıya genel mesaj verilir.
+        error_log("Certification API Error: " . $e->getMessage());
+        echo json_encode(['status' => 'error', 'message' => 'İşlem sırasında bir sistem hatası oluştu.']); 
+        exit(); 
+    }
 }
 
 // --- FİLTRE DEĞİŞKENLERİ (İlk Yükleme) ---
@@ -243,7 +233,6 @@ try {
     $accreditors = $db->query("SELECT id, code FROM acreditor ORDER BY code ASC")->fetchAll(PDO::FETCH_ASSOC);
     $statuses = $db->query("SELECT id, status FROM certification_status ORDER BY id ASC")->fetchAll(PDO::FETCH_ASSOC);
     
-    // LİSTELEME SORGUSU (FİLTRELİ)
     $sqlList = "SELECT 
                     c.id, 
                     comp.c_name as company_name, 
@@ -259,20 +248,9 @@ try {
                 
     $params = [];
 
-    if ($f_company_id > 0) {
-        $sqlList .= " AND c.f_company_id = ?";
-        $params[] = $f_company_id;
-    }
-
-    if ($f_cert_id > 0) {
-        $sqlList .= " AND c.f_cert_id = ?";
-        $params[] = $f_cert_id;
-    }
-
-    if ($f_status > 0) {
-        $sqlList .= " AND c.status = ?";
-        $params[] = $f_status;
-    }
+    if ($f_company_id > 0) { $sqlList .= " AND c.f_company_id = ?"; $params[] = $f_company_id; }
+    if ($f_cert_id > 0) { $sqlList .= " AND c.f_cert_id = ?"; $params[] = $f_cert_id; }
+    if ($f_status > 0) { $sqlList .= " AND c.status = ?"; $params[] = $f_status; }
 
     $sqlList .= " ORDER BY c.id DESC";
     
@@ -280,7 +258,10 @@ try {
     $stmt->execute($params);
     $certifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-} catch (PDOException $e) { $error = $e->getMessage(); }
+} catch (PDOException $e) { 
+    error_log("Certification Page Load Error: " . $e->getMessage());
+    $error = "Veriler yüklenirken sistemsel bir hata oluştu."; 
+}
 
 ?>
 <!DOCTYPE html>
@@ -373,11 +354,11 @@ try {
         <div class="filter-group">
             <label>Firma</label>
             <div class="dropdown">
-                <input type="hidden" name="company_id" id="search_company_id" value="<?php echo $f_company_id > 0 ? $f_company_id : ''; ?>">
+                <input type="hidden" name="company_id" id="search_company_id" value="<?php echo htmlspecialchars($f_company_id > 0 ? $f_company_id : '', ENT_QUOTES, 'UTF-8'); ?>">
                 <button type="button" id="search_companyBtn" onclick="toggleDropdown('search_companyFilterDropdown')" class="dropbtn" style="width:100%">
                     <?php 
                         $selectedComp = 'Tümü';
-                        foreach($companies as $c){ if($c['id'] == $f_company_id) $selectedComp = htmlspecialchars($c['c_name']); }
+                        foreach($companies as $c){ if($c['id'] == $f_company_id) $selectedComp = htmlspecialchars($c['c_name'], ENT_QUOTES, 'UTF-8'); }
                         echo $selectedComp;
                     ?>
                     <span class="arrow-down">&#9662;</span>
@@ -386,7 +367,7 @@ try {
                     <input type="text" placeholder="Ara..." onkeyup="filterDropdown('search_companyFilterDropdown')">
                     <a href="javascript:void(0)" onclick="selectFilterOption('search_company_id', '', 'Tümü', 'search_companyFilterDropdown')">Tümü</a>
                     <?php foreach($companies as $c): ?>
-                        <a href="javascript:void(0)" onclick="selectFilterOption('search_company_id', '<?php echo $c['id']; ?>', '<?php echo htmlspecialchars($c['c_name']); ?>', 'search_companyFilterDropdown')">
+                        <a href="javascript:void(0)" onclick="selectFilterOption('search_company_id', '<?php echo $c['id']; ?>', '<?php echo htmlspecialchars($c['c_name'], ENT_QUOTES, 'UTF-8'); ?>', 'search_companyFilterDropdown')">
                             <?php echo htmlspecialchars($c['c_name']); ?>
                         </a>
                     <?php endforeach; ?>
@@ -397,11 +378,11 @@ try {
         <div class="filter-group">
             <label>Belge Türü</label>
             <div class="dropdown">
-                <input type="hidden" name="cert_id" id="search_cert_id" value="<?php echo $f_cert_id > 0 ? $f_cert_id : ''; ?>">
+                <input type="hidden" name="cert_id" id="search_cert_id" value="<?php echo htmlspecialchars($f_cert_id > 0 ? $f_cert_id : '', ENT_QUOTES, 'UTF-8'); ?>">
                 <button type="button" id="search_certBtn" onclick="toggleDropdown('search_certFilterDropdown')" class="dropbtn" style="width:100%">
                      <?php 
                         $selectedCert = 'Tümü';
-                        foreach($certTypes as $ct){ if($ct['id'] == $f_cert_id) $selectedCert = htmlspecialchars($ct['name']); }
+                        foreach($certTypes as $ct){ if($ct['id'] == $f_cert_id) $selectedCert = htmlspecialchars($ct['name'], ENT_QUOTES, 'UTF-8'); }
                         echo $selectedCert;
                     ?>
                     <span class="arrow-down">&#9662;</span>
@@ -410,7 +391,7 @@ try {
                     <input type="text" placeholder="Ara..." onkeyup="filterDropdown('search_certFilterDropdown')">
                     <a href="javascript:void(0)" onclick="selectFilterOption('search_cert_id', '', 'Tümü', 'search_certFilterDropdown')">Tümü</a>
                     <?php foreach($certTypes as $ct): ?>
-                         <a href="javascript:void(0)" onclick="selectFilterOption('search_cert_id', '<?php echo $ct['id']; ?>', '<?php echo htmlspecialchars($ct['name']); ?>', 'search_certFilterDropdown')">
+                         <a href="javascript:void(0)" onclick="selectFilterOption('search_cert_id', '<?php echo $ct['id']; ?>', '<?php echo htmlspecialchars($ct['name'], ENT_QUOTES, 'UTF-8'); ?>', 'search_certFilterDropdown')">
                             <?php echo htmlspecialchars($ct['name']); ?>
                         </a>
                     <?php endforeach; ?>
@@ -421,11 +402,11 @@ try {
         <div class="filter-group">
             <label>Durum</label>
             <div class="dropdown">
-                <input type="hidden" name="status" id="search_status" value="<?php echo $f_status > 0 ? $f_status : ''; ?>">
+                <input type="hidden" name="status" id="search_status" value="<?php echo htmlspecialchars($f_status > 0 ? $f_status : '', ENT_QUOTES, 'UTF-8'); ?>">
                 <button type="button" id="search_statusBtn" onclick="toggleDropdown('search_statusFilterDropdown')" class="dropbtn" style="width:100%">
                     <?php 
                         $stLabel = 'Tümü';
-                        foreach($statuses as $st) { if($st['id'] == $f_status) $stLabel = htmlspecialchars($st['status']); }
+                        foreach($statuses as $st) { if($st['id'] == $f_status) $stLabel = htmlspecialchars($st['status'], ENT_QUOTES, 'UTF-8'); }
                         echo $stLabel;
                     ?>
                     <span class="arrow-down">&#9662;</span>
@@ -433,7 +414,7 @@ try {
                 <div id="search_statusFilterDropdown" class="dropdown-content">
                     <a href="javascript:void(0)" onclick="selectFilterOption('search_status', '', 'Tümü', 'search_statusFilterDropdown')">Tümü</a>
                     <?php foreach ($statuses as $st): ?>
-                        <a href="javascript:void(0)" onclick="selectFilterOption('search_status', '<?php echo $st['id']; ?>', '<?php echo htmlspecialchars($st['status']); ?>', 'search_statusFilterDropdown')">
+                        <a href="javascript:void(0)" onclick="selectFilterOption('search_status', '<?php echo $st['id']; ?>', '<?php echo htmlspecialchars($st['status'], ENT_QUOTES, 'UTF-8'); ?>', 'search_statusFilterDropdown')">
                             <?php echo htmlspecialchars($st['status']); ?>
                         </a>
                     <?php endforeach; ?>
@@ -465,10 +446,10 @@ try {
                 <?php if (!empty($certifications)): ?>
                     <?php foreach ($certifications as $cert): ?>
                     <tr id="row-<?php echo $cert['id']; ?>">
-                        <td><?php echo htmlspecialchars($cert['certno'] ?? ''); ?></td>
-                        <td><?php echo htmlspecialchars($cert['cert_name'] ?? ''); ?></td>
-                        <td><?php echo htmlspecialchars($cert['company_name'] ?? ''); ?></td>
-                        <td><?php echo htmlspecialchars($cert['end_date'] ?? ''); ?></td>
+                        <td><?php echo htmlspecialchars($cert['certno'] ?? '', ENT_QUOTES, 'UTF-8'); ?></td>
+                        <td><?php echo htmlspecialchars($cert['cert_name'] ?? '', ENT_QUOTES, 'UTF-8'); ?></td>
+                        <td><?php echo htmlspecialchars($cert['company_name'] ?? '', ENT_QUOTES, 'UTF-8'); ?></td>
+                        <td><?php echo htmlspecialchars($cert['end_date'] ?? '', ENT_QUOTES, 'UTF-8'); ?></td>
                         <td>
                             <?php 
                                 $statusColor = 'gray';
@@ -476,13 +457,13 @@ try {
                                 if($statusName == 'Aktif') $statusColor = 'green';
                                 if($statusName == 'Pasif' || $statusName == 'İptal') $statusColor = 'red';
                                 if($statusName == 'Askıda') $statusColor = 'orange';
-                                echo "<span style='color:$statusColor; font-weight:bold;'>".htmlspecialchars($statusName)."</span>";
+                                echo "<span style='color:$statusColor; font-weight:bold;'>".htmlspecialchars($statusName, ENT_QUOTES, 'UTF-8')."</span>";
                             ?>
                         </td>
                         <?php if ($canManage): ?>
                         <td>
-                            <button class="action-button update" onclick="openModal('update', <?php echo $cert['id']; ?>)">Güncelle</button>
-                            <button class="action-button delete" onclick="deleteCert(<?php echo $cert['id']; ?>)">Sil</button>
+                            <button class="action-button update" onclick="openModal('update', '<?php echo htmlspecialchars($cert['id'], ENT_QUOTES, 'UTF-8'); ?>')">Güncelle</button>
+                            <button class="action-button delete" onclick="deleteCert('<?php echo htmlspecialchars($cert['id'], ENT_QUOTES, 'UTF-8'); ?>')">Sil</button>
                         </td>
                         <?php endif; ?>
                     </tr>
@@ -512,7 +493,7 @@ try {
                         <div id="companyDropdown" class="dropdown-content">
                             <input type="text" placeholder="Ara..." class="search-input-dropdown" onkeyup="filterDropdown('companyDropdown')">
                             <?php foreach ($companies as $c): ?>
-                                <a href="javascript:void(0)" data-id="<?php echo $c['id']; ?>" onclick="selectOption('f_company_id', '<?php echo $c['id']; ?>', '<?php echo htmlspecialchars($c['c_name']); ?>', 'companyDropdown')"><?php echo htmlspecialchars($c['c_name']); ?></a>
+                                <a href="javascript:void(0)" data-id="<?php echo $c['id']; ?>" onclick="selectOption('f_company_id', '<?php echo $c['id']; ?>', '<?php echo htmlspecialchars($c['c_name'], ENT_QUOTES, 'UTF-8'); ?>', 'companyDropdown')"><?php echo htmlspecialchars($c['c_name']); ?></a>
                             <?php endforeach; ?>
                         </div>
                     </div>
@@ -526,7 +507,7 @@ try {
                         <div id="certDropdown" class="dropdown-content">
                             <input type="text" placeholder="Ara..." class="search-input-dropdown" onkeyup="filterDropdown('certDropdown')">
                             <?php foreach ($certTypes as $ct): ?>
-                                <a href="javascript:void(0)" data-id="<?php echo $ct['id']; ?>" data-period="<?php echo $ct['period']; ?>" onclick="selectOption('f_cert_id', '<?php echo $ct['id']; ?>', '<?php echo htmlspecialchars($ct['name']); ?>', 'certDropdown')"><?php echo htmlspecialchars($ct['name']); ?></a>
+                                <a href="javascript:void(0)" data-id="<?php echo $ct['id']; ?>" data-period="<?php echo $ct['period']; ?>" onclick="selectOption('f_cert_id', '<?php echo $ct['id']; ?>', '<?php echo htmlspecialchars($ct['name'], ENT_QUOTES, 'UTF-8'); ?>', 'certDropdown')"><?php echo htmlspecialchars($ct['name']); ?></a>
                             <?php endforeach; ?>
                         </div>
                     </div>
@@ -566,7 +547,7 @@ try {
                                 <i class="fa fa-times-circle"></i> Seçimi Temizle
                             </a>
                              <?php foreach ($accreditors as $acc): ?>
-                                <a href="javascript:void(0)" data-id="<?php echo $acc['id']; ?>" onclick="selectOption('accreditor', '<?php echo $acc['id']; ?>', '<?php echo htmlspecialchars($acc['code']); ?>', 'accreditorDropdown')"><?php echo htmlspecialchars($acc['code']); ?></a>
+                                <a href="javascript:void(0)" data-id="<?php echo $acc['id']; ?>" onclick="selectOption('accreditor', '<?php echo $acc['id']; ?>', '<?php echo htmlspecialchars($acc['code'], ENT_QUOTES, 'UTF-8'); ?>', 'accreditorDropdown')"><?php echo htmlspecialchars($acc['code']); ?></a>
                             <?php endforeach; ?>
                         </div>
                     </div>
@@ -585,7 +566,7 @@ try {
                             </a>
     
                              <?php foreach ($consultants as $cons): ?>
-                                <a href="javascript:void(0)" data-id="<?php echo $cons['id']; ?>" onclick="selectOption('consult_company_id', '<?php echo $cons['id']; ?>', '<?php echo htmlspecialchars($cons['c_name']); ?>', 'consultDropdown')"><?php echo htmlspecialchars($cons['c_name']); ?></a>
+                                <a href="javascript:void(0)" data-id="<?php echo $cons['id']; ?>" onclick="selectOption('consult_company_id', '<?php echo $cons['id']; ?>', '<?php echo htmlspecialchars($cons['c_name'], ENT_QUOTES, 'UTF-8'); ?>', 'consultDropdown')"><?php echo htmlspecialchars($cons['c_name']); ?></a>
                             <?php endforeach; ?>
                         </div>
                     </div>
@@ -598,7 +579,7 @@ try {
                         <button type="button" id="statusBtn" onclick="toggleDropdown('statusDropdown')" class="dropbtn">Aktif <span class="arrow-down">&#9662;</span></button>
                         <div id="statusDropdown" class="dropdown-content">
                             <?php foreach ($statuses as $st): ?>
-                                <a href="javascript:void(0)" data-id="<?php echo $st['id']; ?>" onclick="selectOption('status', '<?php echo $st['id']; ?>', '<?php echo htmlspecialchars($st['status']); ?>', 'statusDropdown')"><?php echo htmlspecialchars($st['status']); ?></a>
+                                <a href="javascript:void(0)" data-id="<?php echo $st['id']; ?>" onclick="selectOption('status', '<?php echo $st['id']; ?>', '<?php echo htmlspecialchars($st['status'], ENT_QUOTES, 'UTF-8'); ?>', 'statusDropdown')"><?php echo htmlspecialchars($st['status']); ?></a>
                             <?php endforeach; ?>
                         </div>
                     </div>
@@ -614,12 +595,21 @@ try {
 </div>
 
 <script>
-    
+    // --- GÜVENLİK (XSS) GÜNCELLEMESİ: Merkezi Escape Fonksiyonu ---
+    function escapeHTML(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     let currentCertPeriod = 0;
     let dataTable;
 
     $(document).ready(function() {
-        // 1. Initial State Handling (Sayfa ilk yüklendiğinde)
         const urlParams = new URLSearchParams(window.location.search);
         const companyId = urlParams.get('company_id');
         const certId = urlParams.get('cert_id');
@@ -643,41 +633,34 @@ try {
             "pageLength": 10,
             "dom": 'rtip',
             "language": { "url": "//cdn.datatables.net/plug-ins/1.13.6/i18n/tr.json" },
-            "columnDefs": [ { "orderable": false, "targets": 5 } ], // Sütun sayısı 6, index 5
+            "columnDefs": [ { "orderable": false, "targets": 5 } ],
             "autoWidth": false
         });
         $('#customSearch').on('keyup', function() { dataTable.search(this.value).draw(); });
     });
 
-    // --- POPSTATE EVENT LISTENER (BACK BUTTON SUPPORT) ---
     window.addEventListener('popstate', function(event) {
-        // 1. URL'den parametreleri oku
         const urlParams = new URLSearchParams(window.location.search);
         const companyId = urlParams.get('company_id') || '';
         const certId = urlParams.get('cert_id') || '';
         const status = urlParams.get('status') || '';
 
-        // 2. Hidden Inputları Güncelle
         document.getElementById('search_company_id').value = companyId;
         document.getElementById('search_cert_id').value = certId;
         document.getElementById('search_status').value = status;
 
-        // 3. Dropdown Buton Metinlerini Görsel Olarak Güncelle
         syncFilterDropdownUI('search_company_id', companyId, 'search_companyFilterDropdown');
         syncFilterDropdownUI('search_cert_id', certId, 'search_certFilterDropdown');
         syncFilterDropdownUI('search_status', status, 'search_statusFilterDropdown');
 
-        // 4. Tabloyu Güncelle (False = Geçmişe yeni kayıt atma)
         applyFilters(false);
     });
 
-    // Dropdown UI Senkronizasyon Yardımcısı
     function syncFilterDropdownUI(inputId, value, dropdownId) {
         const dropdown = document.getElementById(dropdownId);
-        let text = 'Tümü'; // Varsayılan metin
+        let text = 'Tümü'; 
 
         if (value) {
-            // Dropdown içindeki linkleri tara, değeri bul ve metnini al
             const links = dropdown.querySelectorAll('a');
             for (let link of links) {
                 if (link.getAttribute('onclick') && link.getAttribute('onclick').includes(`'${value}'`)) {
@@ -692,16 +675,15 @@ try {
         if(inputId === 'search_status') btnId = 'search_statusBtn';
 
         const btn = document.getElementById(btnId);
-        if(btn) btn.innerHTML = text + ' <span class="arrow-down">&#9662;</span>';
+        // GÜVENLİK GÜNCELLEMESİ: Dinamik metin escape edildi
+        if(btn) btn.innerHTML = escapeHTML(text) + ' <span class="arrow-down">&#9662;</span>';
     }
 
-    // --- FİLTRELEME FONKSİYONU ---
     function applyFilters(pushToHistory = true) {
         const companyId = document.getElementById('search_company_id').value;
         const certId = document.getElementById('search_cert_id').value;
         const status = document.getElementById('search_status').value;
 
-        // URL Yapılandırması
         const newUrl = new URL(window.location.href);
         if(companyId) newUrl.searchParams.set('company_id', companyId); else newUrl.searchParams.delete('company_id');
         if(certId) newUrl.searchParams.set('cert_id', certId); else newUrl.searchParams.delete('cert_id');
@@ -713,7 +695,6 @@ try {
             window.history.replaceState(null, '', newUrl);
         }
 
-        // Veriyi Çek
         const fd = new FormData();
         fd.append('action', 'filter_certifications');
         fd.append('company_id', companyId);
@@ -727,32 +708,42 @@ try {
                 dataTable.clear();
                 
                 res.data.forEach(row => {
-                    let statusColor = 'gray';
-                    if(row.status_name == 'Aktif') statusColor = 'green';
-                    if(row.status_name == 'Pasif' || row.status_name == 'İptal') statusColor = 'red';
-                    if(row.status_name == 'Askıda') statusColor = 'orange';
+                    // GÜVENLİK GÜNCELLEMESİ: Değişkenler DataTables'a (DOM'a) basılmadan önce escape edildi.
+                    const safeId = escapeHTML(row.id);
+                    const safeCompany = escapeHTML(row.company_name);
+                    const safeCertName = escapeHTML(row.cert_name);
+                    const safeCertNo = escapeHTML(row.certno);
+                    const safeEndDate = escapeHTML(row.end_date);
+                    const safeStatusName = escapeHTML(row.status_name);
 
-                    const statusHtml = `<span style='color:${statusColor}; font-weight:bold;'>${row.status_name || ''}</span>`;
+                    let statusColor = 'gray';
+                    if(safeStatusName == 'Aktif') statusColor = 'green';
+                    if(safeStatusName == 'Pasif' || safeStatusName == 'İptal') statusColor = 'red';
+                    if(safeStatusName == 'Askıda') statusColor = 'orange';
+
+                    const statusHtml = `<span style='color:${statusColor}; font-weight:bold;'>${safeStatusName}</span>`;
                     
                     let actionHtml = '';
                     <?php if($canManage): ?>
                     actionHtml = `
-                        <button class="action-button update" onclick="openModal('update', ${row.id})">Güncelle</button>
-                        <button class="action-button delete" onclick="deleteCert(${row.id})">Sil</button>
+                        <button class="action-button update" onclick="openModal('update', '${safeId}')">Güncelle</button>
+                        <button class="action-button delete" onclick="deleteCert('${safeId}')">Sil</button>
                     `;
                     <?php endif; ?>
 
                     dataTable.row.add([
-                        row.company_name || '',
-                        row.cert_name || '',
-                        row.certno || '',
-                        row.end_date || '',
+                        safeCertNo,
+                        safeCertName,
+                        safeCompany,
+                        safeEndDate,
                         statusHtml,
                         actionHtml
                     ]);
                 });
                 
                 dataTable.draw();
+            } else {
+                alert('Hata: ' + escapeHTML(res.message));
             }
         });
     }
@@ -772,7 +763,6 @@ try {
         applyFilters(false);
     }
 
-    // --- TARİH HESAPLAMA ---
     function calculateEndDate() {
         const publishDateVal = document.getElementById('publish_date').value;
         
@@ -789,7 +779,6 @@ try {
         }
     }
 
-    // --- UI YARDIMCILARI ---
     function toggleDropdown(id) { document.getElementById(id).classList.toggle("show"); }
 
     window.onclick = function(e) {
@@ -816,25 +805,25 @@ try {
         }
     }
 
-    // FİLTRE SEÇİM FONKSİYONU
     function selectFilterOption(inputId, value, text, dropdownId) {
         document.getElementById(inputId).value = value;
         const baseId = inputId.replace('_id', ''); 
         const btnId = baseId + 'Btn';
         
         const btn = document.getElementById(btnId);
+        // GÜVENLİK GÜNCELLEMESİ: Dinamik metin escape edildi
         if(btn) {
-             btn.innerHTML = text + ' <span class="arrow-down">&#9662;</span>';
+             btn.innerHTML = escapeHTML(text) + ' <span class="arrow-down">&#9662;</span>';
         }
 
         document.getElementById(dropdownId).classList.remove('show');
     }
 
-    // MODAL SEÇİM FONKSİYONU
     function selectOption(inputId, value, text, dropdownId) {
         document.getElementById(inputId).value = value;
         const btn = document.getElementById(dropdownId).closest('.dropdown').querySelector('.dropbtn');
-        btn.innerHTML = text + ' <span class="arrow-down">&#9662;</span>';
+        // GÜVENLİK GÜNCELLEMESİ: Dinamik metin escape edildi
+        btn.innerHTML = escapeHTML(text) + ' <span class="arrow-down">&#9662;</span>';
         
         if (inputId === 'f_cert_id') {
             const dropdown = document.getElementById(dropdownId);
@@ -846,7 +835,6 @@ try {
         }
     }
 
-    // --- MODAL İŞLEMLERİ ---
     function openModal(type, id = 0) {
         const modal = document.getElementById('certModal');
         const form = document.getElementById('certForm');
@@ -899,7 +887,7 @@ try {
                     setDropdownByValue('status', d.status, 'statusDropdown');
 
                 } else {
-                    alert(res.message);
+                    alert(escapeHTML(res.message));
                 }
             })
             .catch(err => console.error(err));
@@ -911,12 +899,11 @@ try {
         if(!value) return;
         document.getElementById(inputId).value = value;
         const dropdown = document.getElementById(dropdownId);
-        // data-id ile modal dropdown linkini bul
         const link = dropdown.querySelector(`a[data-id='${value}']`);
         
         if(link) {
              const btn = dropdown.closest('.dropdown').querySelector('.dropbtn');
-             btn.innerHTML = link.textContent + ' <span class="arrow-down">&#9662;</span>';
+             btn.innerHTML = escapeHTML(link.textContent) + ' <span class="arrow-down">&#9662;</span>';
         }
     }
 
@@ -942,12 +929,11 @@ try {
         .then(r => r.json())
         .then(data => {
             if (data.status === 'success') {
-                alert(data.message);
-                // Sayfayı yenilemek yerine tabloyu güncelle (Filtreyi tekrar çalıştır)
+                alert(escapeHTML(data.message));
                 closeModal();
                 applyFilters(); 
             } else {
-                alert('Hata: ' + data.message);
+                alert('Hata: ' + escapeHTML(data.message));
             }
         })
         .catch(err => { console.error(err); alert('Bir hata oluştu.'); });
@@ -962,10 +948,10 @@ try {
             .then(r => r.json())
             .then(data => {
                 if (data.status === 'success') {
-                    alert(data.message);
-                    applyFilters(); // Tabloyu yenile
+                    alert(escapeHTML(data.message));
+                    applyFilters(); 
                 } else {
-                    alert('Hata: ' + data.message);
+                    alert('Hata: ' + escapeHTML(data.message));
                 }
             })
             .catch(err => console.error(err));
